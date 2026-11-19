@@ -26,15 +26,23 @@ allow_ip() {
 }
 
 # 扫描范围：tracked + 未被 .gitignore 忽略的 untracked
-mapfile -t FILES < <(
+# 注意：不要用 mapfile（macOS 自带 bash 3.2 没有它，会静默枚举不到文件 → 假绿）。
+# 这里用 while read 逐行填数组，并且枚举为空时 **fail closed**。
+FILES=()
+while IFS= read -r f; do
+  [ -n "$f" ] && [ -f "$f" ] && FILES+=("$f")
+done < <(
   git ls-files -co --exclude-standard 2>/dev/null \
-    | grep -vE '^(\.github/|scripts/secret_scan\.sh$)' \
-    | while IFS= read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done
+    | grep -vE '^(\.github/|scripts/secret_scan\.sh$)'
 )
 
 if [ "${#FILES[@]}" -eq 0 ]; then
-  echo "[警告] 没有可扫描的文件（当前不在 git 仓库里？）"; exit 2
+  # 扫不到文件就等于没扫 —— 这种"绿"是假绿，必须当成失败
+  echo "❌ 闸门失败：没有枚举到任何文件（不在 git 仓库根，或 git 不可用）。"
+  echo "   假绿比漏测更危险，所以这里直接失败，而不是打印通过。"
+  exit 1
 fi
+echo "[信息] 扫描 ${#FILES[@]} 个文件（tracked + untracked）"
 
 run_grep() {   # run_grep <说明> <扩展正则>
   local label="$1" rx="$2" out
