@@ -127,4 +127,5 @@ async def test_events_survive_restart_only_in_memory(gw):
         assert json_of(await g.client.get("/admin/state"))["cards"][0]["events"] != []
         # reconcile 事件在启动时就写进去了，之后没有外部来源
         kinds = {e["kind"] for e in json_of(await g.client.get("/admin/state"))["cards"][0]["events"]}
-        assert kinds <= {"reconcile"}
+        # 事件类型随实现演进：老后端回退盲睡写 reconcile，新后端读状态写 reconcile_status
+        assert kinds <= {"reconcile", "reconcile_status", "reconcile_awake"}

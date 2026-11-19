@@ -41,6 +41,32 @@ class OmniClient:
         except Exception:
             return False
 
+    async def status(self, m: ModelConfig) -> dict[str, Any] | None:
+        """读后端的权威睡眠状态（GET /v1/omni/status）。
+
+        返回 None 表示后端不支持这个端点（老镜像）——调用方必须回退到
+        "盲睡一遍"的旧对账方式，不能把 None 当成"已经睡着了"。
+        """
+        try:
+            r = await self._c.get(
+                f"{m.base_url}/v1/omni/status",
+                params={"stage_ids": ",".join(str(s) for s in m.stage_ids)},
+                timeout=10.0,
+            )
+        except Exception as e:
+            log.info("status %s -> 不可达 %s", m.name, type(e).__name__)
+            return None
+        if r.status_code == 404:
+            log.info("status %s -> 404（后端未打补丁）", m.name)
+            return None
+        if r.status_code != 200:
+            log.info("status %s -> http=%s", m.name, r.status_code)
+            return None
+        try:
+            return r.json()
+        except Exception:
+            return None
+
     async def sleep(self, m: ModelConfig) -> tuple[bool, str]:
         code, txt = await self._post(
             f"{m.base_url}/v1/omni/sleep",

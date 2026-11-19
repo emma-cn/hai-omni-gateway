@@ -140,6 +140,35 @@ async def test_sleep_failure_aborts_switch(gw):
         await card.release(A)
 
 
+async def test_reconcile_reads_status_without_blind_sleep(gw):
+    """A-702：后端能报状态时，对账必须**只读**，不许盲睡。
+
+    盲睡的代价：对"其实醒着、还有在飞请求"的模型发 sleep = 掐掉用户请求。
+    所以有 status 端点就该只读对齐状态。
+    """
+    async with gw() as g:
+        card = g.sched.card_of(A)
+        g.backend.state["omni-a"] = "awake"      # 后端自称醒着
+        await g.sched.reconcile()
+        assert card.awake_model == A, "对账应从后端读到 A 醒着并接管"
+        assert g.backend.count("sleep") == 0, "有 status 端点时不该盲睡"
+        # 反过来：后端说睡着 → 状态归零，同样不盲睡
+        g.backend.state["omni-a"] = "asleep"
+        await g.sched.reconcile()
+        assert card.awake_model is None
+        assert g.backend.count("sleep") == 0
+
+
+async def test_reconcile_falls_back_to_blind_sleep_on_old_backend(gw):
+    """后端没有 status 端点（老镜像）→ 必须回退盲睡，不能把 404 当"已睡着"。"""
+    async with gw() as g:
+        g.backend.status_supported = False
+        card = g.sched.card_of(A)
+        await g.sched.reconcile()
+        assert g.backend.count("sleep") >= 1, "老后端必须回退盲睡，否则状态不可信"
+        assert card.awake_model is None
+
+
 async def test_reconcile_sleep_other_model_keeps_awake_state(gw):
     """对账睡眠"非当前醒着"的模型时，不能把卡上真正醒着的模型抹掉（#11）。
 
@@ -400,8 +429,12 @@ async def test_idle_sleep_failure_keeps_awake_state(gw):
 
 
 async def test_reconcile_sleeps_every_model_and_zeroes_state(gw):
-    """启动对账：把所有后端睡一遍再归零（否则残留醒着的模型会抢显存）。"""
+    """老后端（无 status 端点）的回退路径：盲睡一遍再归零。
+
+    有 status 端点时不该盲睡（见 test_reconcile_reads_status_without_blind_sleep）。
+    """
     async with gw(multi_cfg()) as g:
+        g.backend.status_supported = False      # 模拟没打 status 补丁的老镜像
         g.backend.clear()
         g.sched.card_of(A)._awake = A
         await g.sched.reconcile()
@@ -414,11 +447,14 @@ async def test_reconcile_sleeps_every_model_and_zeroes_state(gw):
 async def test_reconcile_survives_unreachable_backend(gw):
     """某个后端没起来不能拖死启动（实测过 voxcpm2 还没监听时的 ConnectError）。"""
     async with gw() as g:
+        g.backend.status_supported = False     # 走回退盲睡，才能制造 sleep 抛错
         g.backend.raises.add("sleep")
         await g.sched.reconcile()          # 不抛异常
         events = [e for card in g.sched.cards.values() for e in card.events]
-        assert any(e["kind"] == "reconcile" and ("fail" in e["detail"] or "error" in e["detail"])
-                   for e in events)
+        assert any(
+            e["kind"] == "reconcile" and ("fail" in e["detail"] or "error" in e["detail"])
+            for e in events
+        )
 
 
 async def test_two_models_same_card_never_awake_together(gw):

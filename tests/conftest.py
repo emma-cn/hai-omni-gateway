@@ -77,6 +77,8 @@ class FakeBackend:
         self.raises: set[str] = set()
         self.delays: dict[str, float] = {}
         self.dead: set[str] = set()
+        # False = 后端没有 /v1/omni/status（老镜像），网关应回退"盲睡"
+        self.status_supported: bool = True
         # host -> "awake" / "asleep"
         self.state: dict[str, str] = {}
         self.audio = b"RIFF\x24\x00\x00\x00WAVEfake-wav-payload-for-md5-check"
@@ -111,6 +113,8 @@ class FakeBackend:
             return "wakeup"
         if path.endswith("/v1/omni/resume"):
             return "resume"
+        if path.endswith("/v1/omni/status"):
+            return "status"
         if path.endswith("/health"):
             return "health"
         if path.endswith("/v1/audio/speech"):
@@ -154,6 +158,21 @@ class FakeBackend:
             code, text = self.errors[action]
             return _resp(code, text.encode(), content_type="text/plain")
 
+        if action == "status":
+            # 默认 404：模拟"还没打 status 补丁"的老镜像，逼网关走回退路径
+            if self.status_supported is False:
+                return _resp(404, b"Not Found", content_type="text/plain")
+            # 默认"睡着"：这样普通的"按需唤醒"用例流程不变；
+            # 想测"接管已醒着的后端"就显式 state[host] = "awake"
+            asleep = self.state.get(host, "asleep") == "asleep"
+            return _json_resp({
+                "status": "SUCCESS",
+                "stages": {"0": {"sleeping": asleep, "tracked_asleep": asleep}},
+                "asleep": asleep,
+                "paused": False,
+                "sleeping_tags": ["wake"] if asleep else [],
+                "vram": {"free_mb": 1000, "total_mb": 24000, "used_mb": 23000},
+            })
         if action == "sleep":
             self.state[host] = "asleep"
             return _json_resp({"ok": True, "stage_ids": [0]})

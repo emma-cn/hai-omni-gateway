@@ -399,21 +399,47 @@ class Scheduler:
         self._task = asyncio.create_task(self.reaper_loop())
 
     async def reconcile(self) -> None:
-        """启动对账：把每个模型都睡一遍，把状态归零。
+        """启动对账：把网关状态与后端真实状态对齐。
 
-        为什么必须做：网关是这张卡的唯一调度者，但重启后它不知道后端谁还醒着
-        （vllm-omni 的 is_sleeping 只是本地记账，不可信）。如果不归零就按需唤醒，
-        会和"残留醒着的模型"抢显存 → 唤醒 OOM（实测 503）。
-        sleep 对已睡的服务是幂等的（实测 4ms），对醒着的约 2.8s，代价可接受。
+        两种路径，差别很大：
+          A) 后端支持 GET /v1/omni/status（打了 status 补丁）→ **只读**，不动任何模型。
+             这是"免对账"：我们直接知道每个 stage 睡没睡，把 _awake 设对即可。
+          B) 后端是老镜像（404）→ 回退到"盲睡一遍"。盲睡有代价：对其实醒着、
+             还有在飞请求的模型发 sleep，等于把用户请求掐掉。所以在 A 可用时不该盲睡。
+
+        为什么要对账：网关是这张卡的唯一调度者，但重启后它不知道后端谁还醒着。
+        不对账就按需唤醒，会和"残留醒着的模型"抢显存 → 唤醒 OOM（实测 503）。
         """
         for card in self.cards.values():
+            awake_seen: list[str] = []
             for name, m in card.models.items():
+                st = await card.client.status(m)
+                if st is not None:
+                    asleep = bool(st.get("asleep"))
+                    if not asleep:
+                        awake_seen.append(name)
+                    card._event("reconcile_status", name,
+                                f"asleep={asleep} vram={ (st.get('vram') or {}).get('used_mb') }MB")
+                    continue
+                # 老后端：回退盲睡
                 try:
                     ok, err = await card.client.sleep(m)
-                    card._event("reconcile", name, "ok" if ok else f"fail: {err}")
+                    card._event("reconcile", name, "ok(blind)" if ok else f"fail: {err}")
                 except Exception as e:  # 单个后端异常不能拖死启动
                     card._event("reconcile", name, f"error: {type(e).__name__}: {e}")
-            card._awake = None
+
+            if len(awake_seen) == 1:
+                card._awake = awake_seen[0]
+                card._event("reconcile_awake", awake_seen[0], "按后端状态接管")
+                log.info("card %s: 对账发现 %s 醒着，直接接管（不盲睡）", card.cfg.name, awake_seen[0])
+            elif len(awake_seen) > 1:
+                # 同卡多个醒着 = 之前已经撞过显存，只保留状态不让它更乱，并报警
+                card._awake = awake_seen[0]
+                log.error("card %s: 对账发现 %d 个模型同时醒着 %s（显存可能已超卖）",
+                          card.cfg.name, len(awake_seen), awake_seen)
+                card._event("fail", awake_seen[0], f"多模型同时醒着: {awake_seen}")
+            else:
+                card._awake = None
             card._last_switch = 0.0
 
     async def stop(self) -> None:
