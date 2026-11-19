@@ -25,6 +25,9 @@ auth:
   # ⚠ 前面有反代时所有请求的 peer 都是 127.0.0.1 —— 所以"信任哪些 peer"必须显式配，
   #   否则等于全网免 key。
   loopback_bypass: true
+  # 运维面是否也免 token。默认 false —— 本机其它进程/SSH 隧道都能发 loopback 请求，
+  # 一个匿名 /admin/sleep 就能把模型睡掉。只有 dev 环境才建议打开。
+  admin_loopback_bypass: false
   trusted_proxies: ["127.0.0.1", "::1"]
 
   keys:

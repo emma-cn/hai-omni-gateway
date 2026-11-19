@@ -131,9 +131,9 @@ class Authenticator:
         if path in PUBLIC_PATHS or path.startswith("/static/"):
             return Identity(name="public", is_loopback=loopback)
 
-        # 2) 运维面：admin token 或 loopback
+        # 2) 运维面：默认**永远**要 admin token（loopback 也不例外，除非显式放开）
         if is_admin_path:
-            if loopback and loopback_bypass(self.cfg):
+            if loopback and getattr(self.cfg, "admin_loopback_bypass", False):
                 return Identity(name="admin-loopback", is_admin=True, is_loopback=True)
             if not self.cfg.admin_token:
                 raise AuthError(

@@ -151,8 +151,16 @@ def create_app(config_path: str) -> FastAPI:
         等于把某个模型名存不存在泄露给未鉴权客户端。
         """
         peer = request.client.host if request.client else None
+        # 浏览器里打开 /ui 时没法加 Authorization 头，允许 ?token= 传 admin token
+        # （只对运维面生效；业务面仍要求 header，避免 token 出现在 URL/日志里）
+        headers = request.headers
+        if request.url.path.startswith(("/admin", "/ui", "/metrics")):
+            qtok = request.query_params.get("token")
+            if qtok:
+                headers = dict(request.headers)
+                headers["authorization"] = f"Bearer {qtok}"
         try:
-            ident = authr.authenticate(request.url.path, peer, request.headers)
+            ident = authr.authenticate(request.url.path, peer, headers)
         except AuthError as e:
             headers = {}
             if e.status == 429:

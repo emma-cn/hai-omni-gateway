@@ -219,7 +219,14 @@ def base_cfg() -> dict[str, Any]:
         "listen": "127.0.0.1:8080",
         "queue_limit": 200,
         # loopback 免 key；"testclient" 是 ASGI transport 的 peer 名
-        "auth": {"loopback_bypass": True, "loopback_peers": ["127.0.0.1", "::1", "localhost", "testclient"]},
+        "auth": {
+            "loopback_bypass": True,
+            # 测试基座等价"本地 dev"：运维面也免 token，免得每个用例都塞 header。
+            # 生产默认是 False（运维面永远要 token），由
+            # test_admin_surface_requires_token_even_on_loopback 专门覆盖。
+            "admin_loopback_bypass": True,
+            "loopback_peers": ["127.0.0.1", "::1", "localhost", "testclient"],
+        },
         "cards": {"card4": {"min_dwell_s": 0.0, "drain_timeout_s": 0.5}},
         "models": {
             "/models/TTS-A": {
@@ -249,7 +256,11 @@ def multi_cfg() -> dict[str, Any]:
     return {
         "listen": "127.0.0.1:8080",
         "queue_limit": 200,
-        "auth": {"loopback_bypass": True, "loopback_peers": ["127.0.0.1", "::1", "localhost", "testclient"]},
+        "auth": {
+            "loopback_bypass": True,
+            "admin_loopback_bypass": True,
+            "loopback_peers": ["127.0.0.1", "::1", "localhost", "testclient"],
+        },
         "cards": {
             "card4": {"min_dwell_s": 0.0, "drain_timeout_s": 0.5},
             "card5": {"min_dwell_s": 0.0, "drain_timeout_s": 0.5},

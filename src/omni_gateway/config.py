@@ -90,6 +90,11 @@ class AuthConfig:
     # loopback 免 key：本地调试方便。注意反代场景要靠 trusted_proxies 兜住，
     # 否则所有请求的 peer 都是 127.0.0.1，等于全网免 key。
     loopback_bypass: bool = True
+    # 运维面是否也享受 loopback 免 token。**默认 false**：
+    # 本机的其它进程、SSH 隧道、本地浏览器插件都能发起 loopback 请求，
+    # 一个匿名 GET /admin/sleep 就能把模型睡掉，代价太大。
+    # 本地调试想省事就把这个打开（只在 dev 环境）。
+    admin_loopback_bypass: bool = False
     trusted_proxies: list[str] = field(default_factory=lambda: ["127.0.0.1", "::1"])
     # 哪些 peer 地址算"本机"。测试环境里 ASGI transport 的 peer 是 "testclient"，
     # 所以这里做成可配置而不是硬编码——但默认值只含真 loopback。
@@ -143,6 +148,7 @@ class GatewayConfig:
             admin_token=auth_raw.get("admin_token", ""),
             admin_token_env=auth_raw.get("admin_token_env", "OMNI_ADMIN_TOKEN"),
             loopback_bypass=bool(auth_raw.get("loopback_bypass", True)),
+            admin_loopback_bypass=bool(auth_raw.get("admin_loopback_bypass", False)),
             trusted_proxies=list(auth_raw.get("trusted_proxies") or ["127.0.0.1", "::1"]),
             loopback_peers=list(auth_raw.get("loopback_peers") or ["127.0.0.1", "::1", "localhost"]),
             keys=keys,

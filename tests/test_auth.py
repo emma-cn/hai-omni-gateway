@@ -61,6 +61,26 @@ async def test_a101_external_request_with_valid_key_passes(gw):
         assert r2.status_code == 200
 
 
+async def test_admin_surface_requires_token_even_on_loopback(gw):
+    """运维面默认**不信任 loopback**：本机其它进程/SSH 隧道都能发 loopback 请求。
+
+    这也是 A-102/A-103 的判据：验收脚本是从 127.0.0.1 打的。
+    """
+    strict = base_cfg()
+    strict["auth"] = dict(strict["auth"], admin_loopback_bypass=False)   # 生产默认
+    async with gw(strict) as g:              # 且没有 admin_token
+        r = await g.client.get("/admin/state")
+        assert r.status_code == 401
+    raw = base_cfg()
+    raw["auth"] = dict(raw["auth"], admin_token="adm-1", admin_loopback_bypass=False)
+    async with gw(raw) as g:
+        assert (await g.client.get("/admin/state")).status_code == 401
+        assert (await g.client.get("/admin/state",
+                                   headers={"authorization": "Bearer adm-1"})).status_code == 200
+        # 浏览器场景：/ui 可以用 ?token=
+        assert (await g.client.get("/ui?token=adm-1")).status_code == 200
+
+
 async def test_a102_admin_state_requires_admin_token(gw):
     """A-102：运维面 /admin/state 从外部无凭据 → 401。"""
     raw = external_cfg(keys=[{"name": "t", "key": "sk-test-1"}], admin_token="adm-1")
