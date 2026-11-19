@@ -28,6 +28,11 @@ class ModelConfig:
     request_timeout_s: float = 120.0
     ttl_s: float = 300.0           # 空闲多久自动睡；0=永不
     concurrency: int = 4           # 允许同时在飞的请求数（对齐 vllm max_num_seqs）
+    # 该模型能接哪些接口：speech / transcription / image / video
+    capabilities: list[str] = field(default_factory=lambda: ["speech"])
+    # 长任务的"租约"：>0 表示该模型一旦有任务在跑，至少锁住卡这么久不许被换走
+    # （视频生成一次几分钟，绝不能中途被挤下去）
+    lease_s: float = 0.0
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")

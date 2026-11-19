@@ -1,19 +1,21 @@
 # hai-omni-gateway
 
-vllm-omni 音频栈（IndexTTS / VoxCPM2 / MOSS-SoundEffect / Step-Audio-ASR）的**统一入口网关**。
+vllm-omni **多模态**（音频 / 图像 / 视频）服务的统一入口网关。
 
-对外提供**标准 OpenAI 兼容接口**（`/v1/audio/speech`、`/v1/audio/voices`、`/v1/models`），
+对外提供**标准 OpenAI 兼容接口**（`/v1/audio/speech`、`/v1/audio/transcriptions`、
+`/v1/audio/voices`、`/v1/images/generations`、`/v1/images/edits`、`/v1/videos*`），
 对内负责三件事：**路由**、**卡级调度（sleep/wake 换台）**、**请求队列与背压**。
 
 ```
-客户端 / aipai
-      │  OpenAI 兼容请求（model 字段路由）
+客户端 / aipai / 业务方
+      │  OpenAI 兼容请求（model 字段路由 + capability 校验）
       ▼
 hai-omni-gateway  :8080
       │  ① 鉴权/配额（TODO）  ② 队列  ③ 按卡调度：谁该醒
       ▼
 vllm-omni 实例（一个容器 = 一条 pipeline）
       indextts :60589 / voxcpm2 :60592 / sfx :60594 / asr :60596
+      MiniMax-Music3 / MiniMax-H3（待接入，镜像已带 deploy config）
 ```
 
 ## 为什么不用 llama-swap
@@ -60,16 +62,53 @@ llama-swap 的模型生命周期是「**cmd 进程的生死 = 模型是否在显
 
 ## 接口
 
-| 方法 | 路径 | 说明 |
+| 方法 | 路径 | 需要的能力 |
 |---|---|---|
 | GET | `/healthz` | 网关自身健康 + 每张卡当前醒着的模型 |
-| GET | `/v1/models` | 合并各后端，带 `meta.omnigateway.status`（awake/asleep） |
-| POST | `/v1/audio/speech` | 透传；目标模型睡着则先唤醒（排队，不挂死） |
-| POST | `/v1/audio/voices` | 透传（上传命名音色） |
-| DELETE | `/v1/audio/voices/{name}` | 透传 |
+| GET | `/v1/models[?capability=speech]` | 合并各后端，带 `meta.omnigateway.status` / `capabilities` |
+| POST | `/v1/audio/speech` | `speech`（透传；模型睡着则先唤醒） |
+| POST | `/v1/audio/voices`、`DELETE /v1/audio/voices/{name}` | `speech` |
+| POST | `/v1/audio/transcriptions` | `transcription` |
+| POST | `/v1/images/generations`、`/v1/images/edits` | `image` |
+| POST/GET | `/v1/videos`、`GET /v1/videos/{id}`、`/v1/videos/{id}/content` | `video` |
+
+**能力校验**：模型没声明对应 `capabilities` 就返回 400 `unsupported_capability`，
+避免"把视频请求转发给 TTS 模型"这种低级事故。
 
 **model 字段不做改写**：客户端发什么就路由什么，`model` 必须等于 vllm-omni 实际服务的名字
 （例如 `/models/IndexTTS-2.5`）。对 aipai 来说就是「把 `INDEXTTS_URL` 指向网关」，代码零改动。
+
+## 短任务 vs 长任务（这是接视频时最重要的区别）
+
+| | 短任务（TTS / 音效 / 图） | 长任务（视频 / 配乐） |
+|---|---|---|
+| 典型耗时 | 0.3 ~ 3s | 几分钟 ~ 半小时 |
+| 上游语义 | 同步返回产物 | 异步：POST 返回 id，GET 轮询，`/content` 取产物 |
+| 卡占用 | 请求在飞期间占用，返回即释放 | 必须 `lease_s` **锁住卡**，期间禁止换台 |
+| 换台 | 可以频繁切（4~5s 成本） | 绝不允许中途被挤下去（重载代价几分钟到几十分钟） |
+| 网关做法 | 唤醒 → 转发 → 释放 | 唤醒 → 转发（拿 id 后立即释放**占位**，但**租约**仍在）→ 轮询期间该卡不换台 |
+
+## 接入 MiniMax（镜像已带 deploy config，不用写模型代码）
+
+vllm-omni 镜像里有 143 份 deploy config，MiniMax 相关的现成可用：
+
+```
+minimax_h3_disaggregated.yaml            MiniMax H3（PD 分离）
+minimax_h3_disaggregated_turbo_nixl.yaml NIXL + turbo 变体
+minimax_music3.yaml / minimax_music3_2gpu.yaml   配乐
+qwen3_tts*.yaml（8 个变体，含 high_concurrency）
+bagel / glm_image / hunyuan_image3 / ming_image  图像
+causvid_wan / hunyuan_video_15 / wan2_2          视频
+```
+
+接入步骤（每个模型一条）：
+1. `scripts/download_models.sh` 拉权重（照现有四个服务的写法加一条）
+2. `config/<model>.yaml` 从镜像里的 deploy 模板复制出来，按卡位改 `devices` / `gpu_memory_utilization`
+3. compose 里加一个服务（一个容器 = 一条 pipeline）
+4. 网关 `config/gateway.yaml` 加一条模型：`capabilities`、`lease_s`、`ttl_s`、`concurrency`
+
+注意 **H3 的 PD 分离变体**（`*_disaggregated*`）是两段部署、可能跨卡，`stage_ids` 要写 `[0,1]`，
+且它基本吃满一张卡甚至多张——所以这类模型应该 `ttl_s: 0`（不自动睡）+ 独占卡。
 
 ## 运行
 

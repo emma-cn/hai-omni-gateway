@@ -18,6 +18,7 @@ models:
     base_url: http://127.0.0.1:60589
     card: card4
     stage_ids: [0, 1]
+    capabilities: [speech]          # 能接 /v1/audio/speech、/v1/audio/voices
     sleep_level: 1
     wake_timeout_s: 60
     request_timeout_s: 120
@@ -28,20 +29,43 @@ models:
     base_url: http://127.0.0.1:60592
     card: card4
     stage_ids: [0]
+    capabilities: [speech]
     sleep_level: 1
     wake_timeout_s: 60
     request_timeout_s: 120
     ttl_s: 300
     concurrency: 8      # 对齐 vllm 的 max_num_seqs
 
-  # "/models/MOSS-SoundEffect":
+  # ---- 以下是待接入的多模态模型示例（镜像里已有对应 deploy config）----
+  #
+  # "/models/MOSS-SoundEffect":            # 文本 -> 音效 24kHz
   #   base_url: http://127.0.0.1:60594
   #   card: card5
   #   stage_ids: [0, 1]
+  #   capabilities: [speech]
   #   concurrency: 4
   #
-  # "/models/Step-Audio-2-mini":
+  # "/models/Step-Audio-2-mini":           # 字幕 / 时间轴
   #   base_url: http://127.0.0.1:60596
   #   card: card6
   #   stage_ids: [0]
+  #   capabilities: [transcription]
   #   concurrency: 4
+  #
+  # "/models/MiniMax-Music3":              # 配乐（vllm_omni/deploy/minimax_music3.yaml）
+  #   base_url: http://127.0.0.1:60600
+  #   card: card7
+  #   stage_ids: [0]
+  #   capabilities: [speech]               # 产出音频；若上游走 /v1/videos 则改成 video
+  #   lease_s: 600                         # 一次配乐可能跑几分钟，期间锁住卡
+  #   ttl_s: 0
+  #   concurrency: 1
+  #
+  # "/models/MiniMax-H3":                  # 视频（vllm_omni/deploy/minimax_h3_disaggregated*.yaml）
+  #   base_url: http://127.0.0.1:60200
+  #   card: card7
+  #   stage_ids: [0, 1]                    # PD 分离时是两段
+  #   capabilities: [video, image]
+  #   lease_s: 1800                        # 视频任务几分钟到半小时，绝不能被换走
+  #   ttl_s: 0                             # 大模型重载代价高，不自动睡
+  #   concurrency: 1
