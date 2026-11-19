@@ -46,11 +46,78 @@ class CardConfig:
 
 
 @dataclass
+class KeyConfig:
+    """一个调用方 key 的能力边界与配额。
+
+    只放**真的会被读到**的字段（AGENTS 规则 1：配置项不许空挂）。
+    按字符/按音频秒的日额度需要账本（P0-6）才能算准，等账本落地再加，
+    现在加了也只能是摆设。
+    """
+
+    name: str
+    key: str = ""                  # 值本身；更推荐用 key_env 从环境变量读
+    key_env: str = ""              # 环境变量名，非空时优先于 key
+    capabilities: list[str] = field(default_factory=list)   # 空 = 不限
+    models: list[str] = field(default_factory=list)         # 空 = 不限
+    rpm: int = 0                   # 每分钟请求数上限，0 = 不限
+    expires_at: str = ""           # ISO 日期，空 = 不过期
+
+    def resolved_key(self) -> str:
+        import os
+
+        if self.key_env:
+            return os.environ.get(self.key_env, "").strip()
+        return self.key.strip()
+
+    def is_expired(self, now_ts: float | None = None) -> bool:
+        if not self.expires_at:
+            return False
+        import time as _t
+
+        now_ts = _t.time() if now_ts is None else now_ts
+        try:
+            import datetime as _dt
+
+            return _dt.date.fromisoformat(self.expires_at).toordinal() < _dt.date.fromtimestamp(now_ts).toordinal()
+        except ValueError:
+            return False
+
+
+@dataclass
+class AuthConfig:
+    admin_token: str = ""
+    admin_token_env: str = "OMNI_ADMIN_TOKEN"
+    # loopback 免 key：本地调试方便。注意反代场景要靠 trusted_proxies 兜住，
+    # 否则所有请求的 peer 都是 127.0.0.1，等于全网免 key。
+    loopback_bypass: bool = True
+    trusted_proxies: list[str] = field(default_factory=lambda: ["127.0.0.1", "::1"])
+    # 哪些 peer 地址算"本机"。测试环境里 ASGI transport 的 peer 是 "testclient"，
+    # 所以这里做成可配置而不是硬编码——但默认值只含真 loopback。
+    loopback_peers: list[str] = field(default_factory=lambda: ["127.0.0.1", "::1", "localhost"])
+    keys: list[KeyConfig] = field(default_factory=list)
+
+    @property
+    def keys_by_value(self) -> dict[str, KeyConfig]:
+        out: dict[str, KeyConfig] = {}
+        for k in self.keys:
+            v = k.resolved_key()
+            if v:
+                out[v] = k
+        return out
+
+    def resolved_admin_token(self) -> str:
+        import os
+
+        return self.admin_token.strip() or os.environ.get(self.admin_token_env, "").strip()
+
+
+@dataclass
 class GatewayConfig:
     listen: str = "0.0.0.0:8080"
     cards: dict[str, CardConfig] = field(default_factory=dict)
     models: dict[str, ModelConfig] = field(default_factory=dict)
     queue_limit: int = 200         # 每个模型排队上限，超了直接 429
+    auth: AuthConfig = field(default_factory=AuthConfig)
 
     @staticmethod
     def load(path: str | Path) -> GatewayConfig:
@@ -67,11 +134,25 @@ class GatewayConfig:
         for m in models.values():
             if m.card not in cards:
                 cards[m.card] = CardConfig(name=m.card)
+        auth_raw = raw.get("auth") or {}
+        keys = [
+            KeyConfig(name=k.get("name") or f"key{i}", **{kk: vv for kk, vv in k.items() if kk != "name"})
+            for i, k in enumerate(auth_raw.get("keys") or [])
+        ]
+        auth = AuthConfig(
+            admin_token=auth_raw.get("admin_token", ""),
+            admin_token_env=auth_raw.get("admin_token_env", "OMNI_ADMIN_TOKEN"),
+            loopback_bypass=bool(auth_raw.get("loopback_bypass", True)),
+            trusted_proxies=list(auth_raw.get("trusted_proxies") or ["127.0.0.1", "::1"]),
+            loopback_peers=list(auth_raw.get("loopback_peers") or ["127.0.0.1", "::1", "localhost"]),
+            keys=keys,
+        )
         return GatewayConfig(
             listen=raw.get("listen", "0.0.0.0:8080"),
             cards=cards,
             models=models,
             queue_limit=int(raw.get("queue_limit", 200)),
+            auth=auth,
         )
 
     def as_dict(self) -> dict[str, Any]:

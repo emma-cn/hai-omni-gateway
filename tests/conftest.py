@@ -215,8 +215,11 @@ class FakeBackend:
 def base_cfg() -> dict[str, Any]:
     """最小可用配置：一张卡两个 TTS 模型（同卡轮换是核心场景）。"""
     return {
-        "listen": "0.0.0.0:8080",
+        # 测试用 loopback 监听：非 loopback + 无 key 会被 fail-closed 拒绝启动
+        "listen": "127.0.0.1:8080",
         "queue_limit": 200,
+        # loopback 免 key；"testclient" 是 ASGI transport 的 peer 名
+        "auth": {"loopback_bypass": True, "loopback_peers": ["127.0.0.1", "::1", "localhost", "testclient"]},
         "cards": {"card4": {"min_dwell_s": 0.0, "drain_timeout_s": 0.5}},
         "models": {
             "/models/TTS-A": {
@@ -244,8 +247,9 @@ def base_cfg() -> dict[str, Any]:
 def multi_cfg() -> dict[str, Any]:
     """多模态 + 多卡：speech / transcription / image / video 各一个模型。"""
     return {
-        "listen": "0.0.0.0:8080",
+        "listen": "127.0.0.1:8080",
         "queue_limit": 200,
+        "auth": {"loopback_bypass": True, "loopback_peers": ["127.0.0.1", "::1", "localhost", "testclient"]},
         "cards": {
             "card4": {"min_dwell_s": 0.0, "drain_timeout_s": 0.5},
             "card5": {"min_dwell_s": 0.0, "drain_timeout_s": 0.5},
@@ -315,11 +319,21 @@ def gw(make_app, backend):
     import contextlib
 
     @contextlib.asynccontextmanager
-    async def _open(raw: dict[str, Any] | None = None):
+    async def _open(raw: dict[str, Any] | None = None, client_host: str | None = None):
+        """client_host：模拟请求来自哪个地址。
+
+        ⚠ httpx.ASGITransport 默认 client=("127.0.0.1", 123)，也就是**永远像本机**；
+        要测"外部客户端"必须显式传 client_host，否则免 key 的 loopback 分支会一直命中
+        （本仓就踩过：第一版鉴权用例全绿，但测的其实是本机流量）。
+        """
         app = make_app(raw)
         async with app.router.lifespan_context(app):
             backend.clear()
-            transport = httpx.ASGITransport(app=app)
+            transport = (
+                httpx.ASGITransport(app=app, client=(client_host, 4321))
+                if client_host
+                else httpx.ASGITransport(app=app)
+            )
             async with REAL_ASYNC_CLIENT(transport=transport, base_url="http://gw.test") as c:
                 yield SimpleNamespace(
                     app=app, client=c, backend=backend,

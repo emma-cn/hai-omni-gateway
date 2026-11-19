@@ -99,19 +99,21 @@ async def test_unknown_model_404(gw):
         r = await g.client.post("/v1/audio/speech", json=speech_body("/models/NOPE"))
         assert r.status_code == 404
         err = json_of(r)["error"]
-        assert err["type"] == "invalid_request_error"
+        assert err["type"] == "model_not_found"
         assert "/models/NOPE" in err["message"]
 
 
-async def test_missing_model_with_single_candidate_is_resolved(gw):
-    """multipart / 不带 model 的老客户端：候选唯一时自动选中。"""
+async def test_missing_model_is_rejected_not_guessed(gw):
+    """缺 model 一律 400 missing_model —— 即使候选唯一也不猜。
+
+    产品口径：候选数会随部署变化，猜唯一候选等于让行为随部署静默漂移。
+    """
     async with gw(multi_cfg()) as g:
-        # transcription 只有 Step-Audio-2-mini 一个候选
         r = await g.client.post("/v1/audio/transcriptions",
                                 files={"file": ("a.wav", b"RIFF", "audio/wav")})
-        assert r.status_code == 200
-        assert g.backend.count("transcription") == 1
-        assert "omni-t" in g.backend.hosts_for("transcription")
+        assert r.status_code == 400
+        assert json_of(r)["error"]["code"] == "missing_model"
+        assert g.backend.count("transcription") == 0, "不该把请求转发给任何模型"
 
 
 async def test_missing_model_with_several_candidates_400(gw):
@@ -148,8 +150,8 @@ async def test_speech_request_to_video_model_400(gw):
         r = await g.client.post("/v1/audio/speech", json=speech_body("/models/MiniMax-H3"))
         assert r.status_code == 400
         err = json_of(r)["error"]
-        assert err["type"] == "unsupported_capability"
-        assert err["code"] == 400
+        assert err["type"] == "capability_unsupported"
+        assert err["code"] == "capability_unsupported"   # code 是机器码，不是 HTTP 状态
         assert g.backend.count("speech") == 0
 
 
@@ -157,7 +159,7 @@ async def test_video_request_to_tts_model_400(gw):
     async with gw(multi_cfg()) as g:
         r = await g.client.post("/v1/videos", json={"model": "/models/TTS-A", "prompt": "x"})
         assert r.status_code == 400
-        assert json_of(r)["error"]["type"] == "unsupported_capability"
+        assert json_of(r)["error"]["type"] == "capability_unsupported"
         assert g.backend.count("video_create") == 0
 
 
@@ -170,7 +172,7 @@ async def test_image_capability_is_separate_from_video(gw):
         bad = await g.client.post("/v1/images/generations",
                                   json={"model": "/models/TTS-A", "prompt": "cat"})
         assert bad.status_code == 400
-        assert json_of(bad)["error"]["type"] == "unsupported_capability"
+        assert json_of(bad)["error"]["type"] == "capability_unsupported"
 
 
 async def test_unknown_capability_endpoint_is_not_proxied(gw):

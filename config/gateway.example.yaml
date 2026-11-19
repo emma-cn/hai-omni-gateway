@@ -12,6 +12,31 @@ listen: 0.0.0.0:8080
 # 进系统的总量 = 模型 concurrency + queue_limit（例：4 + 16 = 同模型最多 20 个请求在系统内）。
 queue_limit: 200
 
+# ---------------------------------------------------------------- 鉴权（P0-1）
+# 规则：**listen 不是 loopback 时，下面的 keys 与 admin_token 缺一不可**，否则拒绝启动。
+# 这是有意的 fail-closed：一个"忘记配 key"的部署，最坏结果不是 500 而是"谁都能用"。
+auth:
+  # 运维面（/admin/*、/ui、/metrics）的令牌。更推荐用环境变量：
+  #   export OMNI_ADMIN_TOKEN=...
+  admin_token: ""
+  admin_token_env: OMNI_ADMIN_TOKEN
+
+  # 本机免 key（本地调试方便）。
+  # ⚠ 前面有反代时所有请求的 peer 都是 127.0.0.1 —— 所以"信任哪些 peer"必须显式配，
+  #   否则等于全网免 key。
+  loopback_bypass: true
+  trusted_proxies: ["127.0.0.1", "::1"]
+
+  keys:
+    # 值本身写在配置里不安全，生产请用 key_env 指向环境变量。
+    - name: example-app
+      key_env: OMNI_KEY_EXAMPLE_APP
+      # 空 = 不限；列了就只能用这些
+      capabilities: [speech]
+      models: ["/models/IndexTTS-2.5"]
+      rpm: 60            # 每分钟请求数上限，0 = 不限
+      expires_at: ""     # 例 "2027-01-01"；过期后与"key 不存在"返回同一个 401
+
 cards:
   card4:                 # 示例：开发机唯一的 4090；多卡机器上按 4/5/6/7 号卡分配
     # 一个模型醒着至少驻留多久才允许被挤掉。

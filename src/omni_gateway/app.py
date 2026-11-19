@@ -29,6 +29,7 @@ from fastapi import Body, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from . import __version__
+from .auth import AuthError, Authenticator
 from .config import GatewayConfig
 from .scheduler import (
     BackendUnavailable,
@@ -70,7 +71,9 @@ def _error(status: int, message: str, type_: str = "gateway_error", **extra: Any
     headers: dict[str, str] = {}
     if "retry_after" in extra:
         headers["Retry-After"] = str(extra.pop("retry_after"))
-    body = {"error": {"message": message, "type": type_, "code": status, **extra}}
+    # code 是**机器码**（不是 HTTP 状态）：客户端按它分支，HTTP 状态只给人看。
+    # 早期版本把数字塞进 code，导致 400/429 分不清语义，已废弃（见 docs/ERRORS.md）。
+    body = {"error": {"message": message, "type": type_, "code": type_, **extra}}
     return JSONResponse(body, status_code=status, headers=headers)
 
 
@@ -88,8 +91,34 @@ def _capability_for(method: str, path: str) -> str | None:
     return None
 
 
+def _assert_auth_sane(cfg: GatewayConfig) -> None:
+    """非 loopback 监听 + 没配 key/admin token → 拒绝启动（fail closed）。
+
+    最坏的部署不是"起不来"，而是"起来了但谁都能用"——尤其是运维面：
+    一个匿名请求就能把模型睡掉。所以这里宁可直接崩，也不静默裸奔。
+    """
+    host = cfg.listen.rpartition(":")[0]
+    is_loopback_listen = host in ("127.0.0.1", "localhost", "::1")
+    if is_loopback_listen:
+        return
+    has_keys = bool(cfg.auth.keys_by_value)
+    has_admin = bool(cfg.auth.resolved_admin_token())
+    if not has_keys or not has_admin:
+        missing = []
+        if not has_keys:
+            missing.append("auth.keys（业务面 API key）")
+        if not has_admin:
+            missing.append("auth.admin_token / 环境变量 OMNI_ADMIN_TOKEN（运维面）")
+        raise RuntimeError(
+            f"拒绝启动：listen={cfg.listen} 不是 loopback，但缺少 {' + '.join(missing)}。"
+            "开放服务不允许无鉴权运行；调试请把 listen 改成 127.0.0.1:PORT。"
+        )
+
+
 def create_app(config_path: str) -> FastAPI:
     cfg = GatewayConfig.load(config_path)
+    _assert_auth_sane(cfg)
+    authr = Authenticator(cfg.auth)
     client = httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=1800.0, write=120.0, pool=5.0))
     omni = OmniClient(client)
     sched = Scheduler(cfg, omni)
@@ -113,6 +142,28 @@ def create_app(config_path: str) -> FastAPI:
     app.state.cfg = cfg
     app.state.sched = sched
     app.state.client = client
+
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):
+        """鉴权放在路由匹配**之前**。
+
+        历史教训（A-103）：以前"未知模型 404"会先于"无凭据 401"返回，
+        等于把某个模型名存不存在泄露给未鉴权客户端。
+        """
+        peer = request.client.host if request.client else None
+        try:
+            ident = authr.authenticate(request.url.path, peer, request.headers)
+        except AuthError as e:
+            headers = {}
+            if e.status == 429:
+                headers["Retry-After"] = "60"
+            return JSONResponse(
+                {"error": {"message": e.message, "type": e.code, "code": e.code}},
+                status_code=e.status,
+                headers=headers,
+            )
+        request.state.identity = ident
+        return await call_next(request)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
@@ -231,8 +282,36 @@ def create_app(config_path: str) -> FastAPI:
             return _error(502, f"上游转发失败: {type(e).__name__}: {e}", "upstream_error")
 
     def _resolve_model(request: Request, raw: bytes) -> str | None:
+        """从 query / JSON / 表单 / multipart 里取 model。
+
+        为什么不"猜唯一候选"：候选数一变（多挂一个模型），缺 model 的请求就会静默
+        落到别的模型上——开放产品不能有这种随部署漂移的行为。缺就报 400。
+        """
         if request.query_params.get("model"):
             return request.query_params["model"]
+
+        ctype = (request.headers.get("content-type") or "").lower()
+
+        if "multipart/form-data" in ctype or "application/x-www-form-urlencoded" in ctype:
+            # 只做"取一个字段"，不引第三方解析：multipart 里找 name="model" 的分段，
+            # urlencoded 里按 key=value 拆。取值都要去掉引号与换行。
+            text = raw.decode("utf-8", "replace")
+            if "application/x-www-form-urlencoded" in ctype:
+                from urllib.parse import parse_qs
+
+                vals = parse_qs(text).get("model")
+                return vals[0] if vals else None
+            marker = 'name="model"'
+            idx = text.find(marker)
+            if idx >= 0:
+                tail = text[idx + len(marker):]
+                # 跳过其余 header 直到空行，然后取到下一个边界
+                parts = tail.split("\r\n\r\n", 1)
+                if len(parts) == 2:
+                    value = parts[1].split("\r\n", 1)[0].strip()
+                    return value or None
+            return None
+
         try:
             return (json.loads(raw or b"{}") or {}).get("model")
         except Exception:
@@ -244,20 +323,41 @@ def create_app(config_path: str) -> FastAPI:
         raw = await request.body()
         model = _resolve_model(request, raw)
         if not model:
-            # 语音/图像类接口的 model 可能在 multipart 表单或 query 里，退回到唯一候选
+            # 开放产品**不猜**候选：候选数一变，缺 model 的请求就会静默落到别的模型上。
+            # 正确行为是明确报错并列出可用模型。
             candidates = [n for n, m in cfg.models.items() if not cap or cap in m.capabilities]
-            if len(candidates) == 1:
-                model = candidates[0]
-            else:
-                return _error(400, f"缺少 model 字段（候选：{candidates}）", "invalid_request_error")
+            return _error(
+                400,
+                f"缺少 model 字段。可用模型：{candidates}",
+                "missing_model",
+                param="model",
+            )
         if model not in cfg.models:
-            return _error(404, f"未知模型 {model}", "invalid_request_error")
+            return _error(404, f"未知模型 {model}", "model_not_found", param="model")
         if cap and cap not in cfg.models[model].capabilities:
             return _error(
                 400,
                 f"模型 {model} 不支持该接口：需要能力 {cap}，它声明的是 {cfg.models[model].capabilities}",
-                "unsupported_capability",
+                "capability_unsupported",
+                param="model",
             )
+
+        # 按 key 的边界：能力与模型白名单（P0-1）
+        ident = getattr(request.state, "identity", None)
+        if ident is not None:
+            if not ident.allows_model(model):
+                return _error(
+                    403,
+                    f"该 API key（{ident.name}）无权调用模型 {model}",
+                    "forbidden",
+                    param="model",
+                )
+            if cap and not ident.allows_capability(cap):
+                return _error(
+                    403,
+                    f"该 API key（{ident.name}）无权使用能力 {cap}",
+                    "forbidden",
+                )
         return await _passthrough(request, model, path)
 
     # 把声明过的 endpoint 一次性挂到 FastAPI

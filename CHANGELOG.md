@@ -25,6 +25,32 @@
   GitHub 上的 `v0.1.2`（bump 提交）内容不同却同号，即"同号不同内容"。
 - 已发布各号的内容：`v0.1.0 = 6f4131c7`、`v0.1.1 = a8bad3f5`、`v0.1.2 = d534ebca`、`v0.1.3 = 07a03783`。
 
+## [0.1.5] - 2026-11-20
+
+### Added
+- **鉴权与多租户（P0-1 / A-101~A-104）**
+  - 分级：loopback 免 key；非 loopback 必须有 key；运维面（`/admin/*`、`/ui`、`/metrics`）用独立 admin token
+  - `Authorization: Bearer` 与 `x-api-key` 双写法
+  - key 能力边界：`capabilities` / `models` / `rpm` / `expires_at`
+  - **fail closed**：listen 非 loopback 且缺 key 或 admin token → **拒绝启动**
+  - 鉴权在**路由匹配之前**执行（修 A-103：以前"未知模型 404"会先于"无凭据 401"，
+    等于把模型名存在性泄露给未鉴权客户端）
+  - 反代场景：只有 peer 属于 `trusted_proxies` 才采纳 `X-Forwarded-For`，
+    否则任何人都能伪造 `X-Forwarded-For: 127.0.0.1` 绕过鉴权
+- 错误码统一为**机器码**（`code` 不再塞 HTTP 数字），新增 `unauthorized` / `forbidden` / `rate_limited`
+- 缺 `model` 一律 400 `missing_model`（**不再猜唯一候选**）；multipart 表单里的 `model` 也能取到
+
+### 实测（真机，走非 loopback 的局域网地址）
+- 无 key → 401；带正确 key → 200
+- `/admin/state` 无凭据 → 401；带 admin token → 200
+- `/admin/sleep` 无凭据 + 不存在的模型 → **401**（不是 404，确认鉴权先于参数校验）
+- 错误 key → 401 且响应体里没有任何模型名
+- loopback 免 key 仍可用（本机调试不受影响）
+
+### 已知取舍
+- `daily_chars` / `daily_audio_seconds` 类日额度未实现：要账本（P0-6）才能算准，
+  先加字段只会变成空挂配置（AGENTS 规则 1）。
+
 ## [0.1.4] - 2026-11-20
 
 ### Added

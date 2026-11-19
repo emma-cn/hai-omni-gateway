@@ -58,24 +58,37 @@ async def test_running_video_job_holds_card_lease(gw):
     async with gw(multi_cfg()) as g:
         r = await g.client.post("/v1/videos", json={"model": H3, "prompt": "x"})
         assert r.status_code == 202
-        # 同卡的 ASR 模型来一发短请求
-        await g.client.post("/v1/audio/transcriptions",
-                            files={"file": ("a.wav", b"RIFF", "audio/wav")})
+        # 同卡的 ASR 模型来一发短请求（必须带 model，否则请求在鉴权后被 400 挡下，
+        # 这条用例会"因为没人抢卡"而假通过 —— 曾经就这么 XPASS 过一次）
+        steal = await g.client.post(
+            "/v1/audio/transcriptions",
+            files={"file": ("a.wav", b"RIFF", "audio/wav")},
+            data={"model": "/models/Step-Audio-2-mini"},
+        )
+        assert steal.status_code == 200, "抢卡请求本身必须成功，否则测不到租约"
         assert g.backend.state["omni-v"] == "awake", "视频任务在跑，卡却被换走了（租约没生效）"
 
 
-async def test_video_get_single_video_model_routes_without_model_field(gw):
-    """OpenAI 的轮询 GET 不带 model：只有一个视频模型时能唯一路由。"""
+async def test_video_get_requires_model_field(gw):
+    """轮询 GET **必须**带 model（开放产品不猜候选：候选数一变行为就静默改变）。
+
+    契约：缺 model → 400 missing_model 并列出可用模型；带 model → 正常路由。
+    """
     async with gw(multi_cfg()) as g:
         r = await g.client.get("/v1/videos/vid-1")
-        assert r.status_code == 200
-        assert json_of(r)["status"] == "completed"
+        assert r.status_code == 400
+        assert json_of(r)["error"]["code"] == "missing_model"
+
+        ok = await g.client.get("/v1/videos/vid-1", params={"model": H3})
+        assert ok.status_code == 200
+        assert json_of(ok)["status"] == "completed"
         assert g.backend.last("video_get")["host"] == "omni-v"
 
 
 async def test_video_content_bytes_passthrough(gw):
     async with gw(multi_cfg()) as g:
-        r = await g.client.get("/v1/videos/vid-1/content")
+        # 同上：内容端点也要显式 model
+        r = await g.client.get("/v1/videos/vid-1/content", params={"model": H3})
         assert r.status_code == 200
         assert r.content == g.backend.video
         assert r.headers["content-type"].startswith("video/mp4")
@@ -96,12 +109,20 @@ async def test_video_get_with_two_video_models(gw):
         assert r.status_code == 200, f"轮询被拒：{r.status_code} {r.text[:200]}"
 
 
-async def test_video_get_two_video_models_current_400(gw):
-    """现状基线：多视频模型时轮询确实 400（钉住，等修好后这条要一起改）。"""
+async def test_video_get_two_video_models_requires_explicit_model(gw):
+    """多视频模型时**必须**带 model：不带 → 400 missing_model，带了 → 正确路由。
+
+    早期实现会"猜唯一候选"，两个视频模型时就 400；现在统一成"永远不猜"，
+    行为不再随候选数量漂移。
+    """
     async with gw(two_video_cfg()) as g:
         r = await g.client.get("/v1/videos/vid-1")
         assert r.status_code == 400
-        assert json_of(r)["error"]["type"] == "invalid_request_error"
+        assert json_of(r)["error"]["code"] == "missing_model"
+
+        ok = await g.client.get("/v1/videos/vid-1", params={"model": H3})
+        assert ok.status_code == 200
+        assert g.backend.hosts_for("video_get") == ["omni-v"]
 
 
 # --------------------------------------------------------------------- 图像 / ASR
@@ -130,8 +151,10 @@ async def test_image_edits_multipart_passthrough(gw):
 
 async def test_transcription_passthrough(gw):
     async with gw(multi_cfg()) as g:
+        # multipart 里的 model 是普通表单字段（网关会从 multipart 里取它）
         r = await g.client.post("/v1/audio/transcriptions",
-                                files={"file": ("a.wav", b"RIFF", "audio/wav")})
+                                files={"file": ("a.wav", b"RIFF", "audio/wav")},
+                                data={"model": "/models/Step-Audio-2-mini"})
         assert r.status_code == 200
         assert json_of(r)["text"]
         assert g.backend.last("transcription")["host"] == "omni-t"
@@ -150,7 +173,7 @@ async def test_voices_delete_on_video_model_400(gw):
     async with gw(multi_cfg()) as g:
         r = await g.client.delete("/v1/audio/voices/v1", params={"model": H3})
         assert r.status_code == 400
-        assert json_of(r)["error"]["type"] == "unsupported_capability"
+        assert json_of(r)["error"]["type"] == "capability_unsupported"
 
 
 # ------------------------------------------------------------------ 卡位隔离
