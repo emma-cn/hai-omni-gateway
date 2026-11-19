@@ -16,6 +16,15 @@
 - 长任务租约：job 表 + `lease_s` 记账、`Idempotency-Key` 去重
 - 请求账本：每请求一行 JSONL，**排队/唤醒/生成三段耗时分开记**
 
+## 版本号使用规约（重要）
+
+- **正式号 `x.y.z` 只能由 tag 产生**（`scripts/release.sh` → `release.yml`）。tag 指向
+  `chore(release): 版本号 x.y.z` 那个提交，`/healthz` 的 `build` 必须等于该 tag。
+- **dev 构建不得占用正式号**：`scripts/deploy-dev.sh` 会把形如 `x.y.z` 的输入自动改成
+  `x.y.z-dev-<sha>`。起因：曾出现本地镜像 tag `0.1.2`（构建于 bump 提交之前）与
+  GitHub 上的 `v0.1.2`（bump 提交）内容不同却同号，即"同号不同内容"。
+- 已发布各号的内容：`v0.1.0 = 6f4131c7`、`v0.1.1 = a8bad3f5`、`v0.1.2 = d534ebca`、`v0.1.3 = 07a03783`。
+
 ## [0.1.3] - 2026-11-20
 
 ### Added

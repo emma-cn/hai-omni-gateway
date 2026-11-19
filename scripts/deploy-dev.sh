@@ -16,6 +16,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 VER="${1:-$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')}"
+
+# 防"同号不同内容"：dev 镜像绝不占用正式的 x.y.z 号。
+# 正式号只能由 scripts/release.sh + release.yml 产出（tag 指向 bump 提交，
+# 而 dev 构建通常发生在 bump 之前 —— 两者内容不同却同号，事后无法分辨）。
+case "$VER" in
+  [0-9]*.[0-9]*.[0-9]*) VER="${VER}-dev-$(git rev-parse --short HEAD)" ;;
+esac
 IMAGE="hai-omni-gateway:${VER}"
 NAME="hai-omni-gateway"
 CONFIG="${OMNI_GATEWAY_CONFIG:-$ROOT/config/gateway.yaml}"
