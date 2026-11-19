@@ -30,7 +30,17 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 
 from . import __version__
 from .config import GatewayConfig
-from .scheduler import DrainTimeout, QueueFull, RequestTimeout, Scheduler, SleepFailed, WakeFailed
+from .scheduler import (
+    BackendUnavailable,
+    BadRequestRejected,
+    DrainTimeout,
+    QueueFull,
+    RequestTimeout,
+    Scheduler,
+    SleepFailed,
+    WakeFailed,
+    WakeOOM,
+)
 from .upstream import OmniClient
 
 log = logging.getLogger(__name__)
@@ -144,6 +154,18 @@ def create_app(config_path: str) -> FastAPI:
         except WakeFailed as e:
             log.warning("唤醒 %s 失败: %s", model, e)
             return _error(503, f"模型 {model} 唤醒失败，请稍后重试", "wake_failed", retry_after=10)
+        except BackendUnavailable as e:
+            # 后端进程不在：重试唤醒毫无意义。502 让调用方立刻失败，
+            # 且避免把客户端拖到超时。冷却期由 scheduler 负责。
+            log.error("后端不可用（不重试）: %s", e)
+            return _error(502, str(e), "backend_unavailable", retry_after=15)
+        except WakeOOM as e:
+            log.warning("唤醒时显存不足: %s", e)
+            return _error(503, str(e), "wake_oom", retry_after=10)
+        except BadRequestRejected as e:
+            # 上游拒参数：不重试、不计熔断，原样告诉调用方是它自己发错了
+            log.warning("上游拒绝参数: %s", e)
+            return _error(400, str(e), "bad_request")
         except QueueFull as e:
             # 队列满：快速失败 + 告诉客户端多久再来，比让它无限等更有用
             log.warning("队列已满，拒绝排队: %s", e)
@@ -302,13 +324,20 @@ def create_app(config_path: str) -> FastAPI:
             return JSONResponse({"detail": f"未知模型 {model}"}, status_code=404)
         try:
             await sched.card_of(model).force_wake(model)
-        except (WakeFailed, SleepFailed, DrainTimeout, QueueFull, RequestTimeout) as e:
+        except BackendUnavailable as e:
+            return JSONResponse(
+                {"detail": f"后端不可用: {e}", "code": "backend_unavailable"},
+                status_code=502, headers={"Retry-After": "15"},
+            )
+        except BadRequestRejected as e:
+            return JSONResponse({"detail": f"上游拒绝参数: {e}", "code": "bad_request"}, status_code=400)
+        except (WakeOOM, WakeFailed, SleepFailed, DrainTimeout, QueueFull, RequestTimeout) as e:
             # 换台失败一律 503 + Retry-After：对客户端而言"现在切不过去，晚点再来"，
             # 未捕获会变成 500，而 500 会被客户端当成"网关有 bug，不该重试"。
             # detail 保持人话（客户端日志里要能直接读懂），code 给机器判断用。
             # WakeFailed 用"唤醒失败"措辞保持向后兼容（已有用例与客户端按这个词匹配）。
             kind = type(e).__name__.lower()
-            prefix = "唤醒失败" if isinstance(e, WakeFailed) else "换台失败"
+            prefix = "唤醒失败" if isinstance(e, (WakeFailed, WakeOOM)) else "换台失败"
             return JSONResponse(
                 {"detail": f"{prefix}({kind}): {e}", "code": kind},
                 status_code=503,

@@ -51,8 +51,43 @@ class OmniClient:
         log.info("sleep %s -> http=%s %s", m.name, code, "" if ok else txt)
         return ok, txt
 
-    async def wake(self, m: ModelConfig) -> tuple[bool, str]:
-        """wakeup + resume + 等健康；整段受 wake_timeout_s 约束。"""
+    # 失败分类：三者处置完全不同，绝不能都叫 wake_failed
+    #   backend_unavailable —— 连不上 / 进程死了（连接被拒、连接被重置）。
+    #     重试唤醒毫无意义（进程不在，叫不醒），应当快速失败并等后端自愈。
+    #   wake_oom —— 显存不够（上游返回里带 CUDA OOM）。可重试，但要带 Retry-After。
+    #   bad_request —— 上游拒绝参数（4xx）。重试也没用，且不该计入熔断。
+    KIND_OK = "ok"
+    KIND_UNAVAILABLE = "backend_unavailable"
+    KIND_OOM = "wake_oom"
+    KIND_BAD_REQUEST = "bad_request"
+    KIND_UNKNOWN = "wake_failed"
+
+    @staticmethod
+    def _looks_like_oom(text: str) -> bool:
+        t = (text or "").lower()
+        return ("out of memory" in t) or ("cuda error" in t) or ("nomem" in t)
+
+    @classmethod
+    def _classify(cls, code: int, txt: str) -> str:
+        """把一次上游调用的结果归类。
+
+        code=0 是 _post 的"没拿到 HTTP 响应"约定（连接失败/超时），
+        它与"拿到了 4xx/5xx"性质完全不同：前者后端可能已经不在了。
+        """
+        if code == 0:
+            return cls.KIND_UNAVAILABLE
+        if 400 <= code < 500:
+            return cls.KIND_BAD_REQUEST
+        if cls._looks_like_oom(txt):
+            return cls.KIND_OOM
+        return cls.KIND_UNKNOWN
+
+    async def wake(self, m: ModelConfig) -> tuple[bool, str, str]:
+        """wakeup + resume + 等健康；整段受 wake_timeout_s 约束。
+
+        返回 (ok, err, kind)。kind 见上面的四分类——调用方必须按 kind 决定
+        是 502（后端不在）、503（显存不够，可重试）还是 400（参数不对）。
+        """
         t0 = time.monotonic()
         deadline = t0 + m.wake_timeout_s
 
@@ -60,20 +95,23 @@ class OmniClient:
             f"{m.base_url}/v1/omni/wakeup", {"stage_ids": m.stage_ids}, timeout=min(120.0, m.wake_timeout_s)
         )
         if code not in (200, 201):
-            log.warning("wakeup %s failed http=%s %s", m.name, code, txt)
-            return False, f"wakeup http={code} {txt}"
+            kind = self._classify(code, txt)
+            log.warning("wakeup %s failed kind=%s http=%s %s", m.name, kind, code, txt)
+            return False, f"wakeup http={code} {txt}", kind
 
         code, txt = await self._post(
             f"{m.base_url}/v1/omni/resume", {"stage_ids": m.stage_ids}, timeout=min(60.0, m.wake_timeout_s)
         )
         if code not in (200, 201):
-            log.warning("resume %s failed http=%s %s", m.name, code, txt)
-            return False, f"resume http={code} {txt}"
+            kind = self._classify(code, txt)
+            log.warning("resume %s failed kind=%s http=%s %s", m.name, kind, code, txt)
+            return False, f"resume http={code} {txt}", kind
 
         while time.monotonic() < deadline:
             if await self.health(m):
                 log.info("wake %s ok in %.2fs", m.name, time.monotonic() - t0)
-                return True, ""
+                return True, "", self.KIND_OK
             await asyncio.sleep(0.2)
         log.warning("wake %s health timeout after %.1fs", m.name, m.wake_timeout_s)
-        return False, "health check timeout"
+        # 唤醒命令 200 了但健康检查一直不通：进程活着但引擎没起来，按显存/初始化失败处理（可重试）
+        return False, "health check timeout", self.KIND_OOM

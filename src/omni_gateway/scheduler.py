@@ -50,6 +50,23 @@ class DrainTimeout(Exception):
 
 
 
+class BackendUnavailable(Exception):
+    """后端连不上 / 进程已死（ConnectError、连接被重置）。
+
+    与"显存不够"必须分开：进程不在的时候重试唤醒**毫无意义**，
+    只会把日志刷满、把客户端拖到超时。正确处置是快速 502 + 冷却期内不再尝试，
+    等容器自愈（compose 的 restart: unless-stopped）后再放流量进来。
+    """
+
+
+class WakeOOM(Exception):
+    """唤醒时显存不足（上游返回里带 CUDA OOM）。可重试，但要给 Retry-After。"""
+
+
+class BadRequestRejected(Exception):
+    """上游拒绝参数（4xx）。重试无用，也不应计入熔断。"""
+
+
 class QueueFull(Exception):
     """排队人数超过 queue_limit。API 层转 429 + Retry-After。
 
@@ -96,6 +113,9 @@ class Card:
         # 拿 0.0 比较会让 `monotonic() - 0.0 < 30` 恒真 → 空闲睡永远被跳过。
         self._last_idle_fail: float | None = None
         self._idle_fail_backoff_s = 30.0
+        # 后端"进程级不可用"的冷却：连不上时不反复唤醒
+        self._unavailable_until = 0.0
+        self._unavailable_cooldown_s = 15.0
         # 事件环：给管理页展示"谁什么时候被唤醒/睡下/失败"
         self.events: deque[dict[str, Any]] = deque(maxlen=200)
 
@@ -191,6 +211,15 @@ class Card:
         # 名额已占住，再确保模型醒着；醒不过来必须把名额退回，否则会永久泄漏
         try:
             async with self._lock:
+                if (
+                    self._awake != model
+                    and time.monotonic() < self._unavailable_until
+                ):
+                    # 刚判定过后端不可用：冷却期内不再打它（重试唤醒叫不醒一个死进程）
+                    raise BackendUnavailable(
+                        f"{model}: 后端处于不可用冷却期（剩余 "
+                        f"{self._unavailable_until - time.monotonic():.0f}s）"
+                    )
                 if self._awake != model:
                     await self._switch_to(model)
         except BaseException:
@@ -249,11 +278,19 @@ class Card:
             self._event("sleep", cur)
 
         self._event("switch", target, f"from={cur}")
-        ok, err = await self.client.wake(self.models[target])
+        ok, err, kind = await self.client.wake(self.models[target])
         if not ok:
             # 醒不过来：把状态清掉，让下一次请求再试（不要留下"以为醒着"的假状态）
             self._awake = None
-            self._event("fail", target, f"wake: {err}")
+            self._event("fail", target, f"wake[{kind}]: {err}")
+            if kind == "backend_unavailable":
+                # 进程不在，重试唤醒没有意义 → 冷却期内直接快速失败，别打后端
+                self._unavailable_until = time.monotonic() + self._unavailable_cooldown_s
+                raise BackendUnavailable(f"{target}: 后端不可用（{err}）")
+            if kind == "wake_oom":
+                raise WakeOOM(f"{target}: 唤醒时显存不足（{err}）")
+            if kind == "bad_request":
+                raise BadRequestRejected(f"{target}: 上游拒绝参数（{err}）")
             raise WakeFailed(f"{target}: {err}")
         self._awake = target
         self._last_switch = time.monotonic()

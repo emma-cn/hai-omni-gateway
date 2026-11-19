@@ -11,7 +11,16 @@ import time
 import pytest
 
 from conftest import base_cfg, multi_cfg
-from omni_gateway.scheduler import DrainTimeout, QueueFull, RequestTimeout, SleepFailed, WakeFailed
+from omni_gateway.scheduler import (
+    BackendUnavailable,
+    BadRequestRejected,
+    DrainTimeout,
+    QueueFull,
+    RequestTimeout,
+    SleepFailed,
+    WakeFailed,
+    WakeOOM,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -236,7 +245,7 @@ async def test_wakeup_failure_raises_and_clears_state(gw):
     async with gw() as g:
         g.backend.errors["wakeup"] = (500, "CUDA out of memory")
         card = g.sched.card_of(A)
-        with pytest.raises(WakeFailed):
+        with pytest.raises(WakeOOM):          # 分类：显存不足 ≠ 笼统失败
             await card.acquire(A)
         # 不能留下"以为醒着"的假状态
         assert card.awake_model is None
@@ -262,10 +271,38 @@ async def test_health_timeout_raises(gw):
     async with gw(raw) as g:
         g.backend.dead.add("omni-a")
         card = g.sched.card_of(A)
-        with pytest.raises(WakeFailed) as ei:
+        with pytest.raises(WakeOOM) as ei:     # 引擎起不来 = 可重试类
             await card.acquire(A)
         assert "health" in str(ei.value)
         assert card.awake_model is None
+
+
+async def test_backend_unavailable_short_circuits_without_retrying(gw):
+    """连不上后端 → BackendUnavailable，且冷却期内不再尝试唤醒（进程不在，叫不醒）。
+
+    事故背景：后端进程 OOM 退出后，网关把"连不上"也报成 wake_failed 并反复唤醒，
+    既没用又刷日志。三类必须分开：backend_unavailable / wake_oom / bad_request。
+    """
+    async with gw() as g:
+        g.backend.raises.add("wakeup")        # 抛 ConnectError = 进程不在
+        card = g.sched.card_of(A)
+        with pytest.raises(BackendUnavailable):
+            await card.acquire(A)
+        assert card.awake_model is None
+        attempts = g.backend.count("wakeup")
+        # 冷却期内再来一次：必须直接失败，不能再打后端
+        with pytest.raises(BackendUnavailable):
+            await card.acquire(A)
+        assert g.backend.count("wakeup") == attempts, "冷却期内仍在反复唤醒后端"
+
+
+async def test_upstream_4xx_is_bad_request_not_retryable(gw):
+    """上游 4xx → BadRequestRejected（API 层 400），不当作可重试的唤醒失败。"""
+    async with gw() as g:
+        g.backend.errors["wakeup"] = (422, "invalid stage_ids")
+        card = g.sched.card_of(A)
+        with pytest.raises(BadRequestRejected):
+            await card.acquire(A)
 
 
 async def test_recovers_after_wake_failure(gw):

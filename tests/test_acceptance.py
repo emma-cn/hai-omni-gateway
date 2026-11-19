@@ -66,7 +66,8 @@ async def test_acceptance_wake_failure_returns_503_with_retry_after(gw):
         elapsed = time.monotonic() - t0
         assert r.status_code == 503
         assert r.headers.get("retry-after") == "10"
-        assert json_of(r)["error"]["type"] == "wake_failed"
+        # 分类契约：显存不足必须是 wake_oom（可重试），不是笼统的 wake_failed
+        assert json_of(r)["error"]["type"] == "wake_oom"
         assert elapsed < 3.0, f"唤醒失败后拖了 {elapsed:.1f}s 才回"
 
 
