@@ -32,6 +32,14 @@ class WakeFailed(Exception):
     """唤醒失败（OOM / 健康检查超时）。API 层应转成 503 + Retry-After。"""
 
 
+class SleepFailed(Exception):
+    """旧模型睡不下去（OOM / 上游报错）。
+
+    必须立刻中止换台：旧模型还占着显存，此时再去唤醒新模型 = 必然 OOM，
+    而且会把整个后端 API server 打死（实测：进程退出，之后请求全部挂死）。
+    """
+
+
 class DrainTimeout(Exception):
     """换台前 drain 没能在 drain_timeout_s 内清零。
 
@@ -140,10 +148,12 @@ class Card:
                     f"{self.cfg.drain_timeout_s:.0f}s 内未清零；按上游规则不得 sleep，拒绝换台"
                 )
             ok, err = await self.client.sleep(self.models[cur])
-            if ok:
-                self._event("sleep", cur)
-            else:
+            if not ok:
+                # 睡不下去就不能换台：旧模型仍占着显存，再唤醒新模型必然 OOM，
+                # 而 OOM 会把整个后端进程打死（实测），代价远大于让客户端重试。
                 self._event("fail", cur, f"sleep: {err}")
+                raise SleepFailed(f"card {self.cfg.name}: 睡下 {cur} 失败：{err}")
+            self._event("sleep", cur)
 
         self._event("switch", target, f"from={cur}")
         ok, err = await self.client.wake(self.models[target])
@@ -187,9 +197,21 @@ class Card:
             await self._switch_to(model)
 
     async def force_sleep(self, model: str) -> None:
-        """手动睡下（管理页按钮）。有在飞请求时拒绝，避免掐掉用户请求。"""
+        """手动睡下（管理页按钮）。有在飞请求时拒绝，避免掐掉用户请求。
+
+        注意：**不看本地状态**。网关认为"睡着"不代表后端真的放掉了显存
+        （网关重启、外部直接调过上游、OOM 后进程重启都会造成失配），
+        所以这里无条件向上游发一次 sleep（上游 sleep 是幂等的）。
+        """
         async with self._lock:
-            if self._awake != model:
+            if self._awake != model and self._inflight.get(model, 0) == 0:
+                # 状态可能失真：照样向上一游补一发 sleep，然后把状态归零
+                ok, err = await self.client.sleep(self.models[model])
+                self._event("reconcile_sleep" if ok else "fail", model,
+                            "" if ok else f"reconcile_sleep: {err}")
+                self._awake = None
+                if not ok:
+                    raise RuntimeError(f"对账睡眠失败: {err}")
                 return
             if self._inflight.get(model, 0) > 0:
                 raise RuntimeError(f"{model} 还有 {self._inflight[model]} 条请求在飞，拒绝睡眠")

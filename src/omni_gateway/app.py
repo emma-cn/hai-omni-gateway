@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 
 from . import __version__
 from .config import GatewayConfig
-from .scheduler import DrainTimeout, Scheduler, WakeFailed
+from .scheduler import DrainTimeout, Scheduler, SleepFailed, WakeFailed
 from .upstream import OmniClient
 
 log = logging.getLogger(__name__)
@@ -45,6 +45,7 @@ ENDPOINTS: dict[tuple[str, str], str] = {
     ("POST", "/v1/audio/speech"): "speech",
     ("POST", "/v1/audio/transcriptions"): "transcription",
     ("POST", "/v1/audio/voices"): "speech",
+    ("GET", "/v1/audio/voices"): "speech",   # 列音色：上游 200，网关曾漏注册 → 405
     ("POST", "/v1/images/generations"): "image",
     ("POST", "/v1/images/edits"): "image",
     ("POST", "/v1/videos"): "video",
@@ -143,6 +144,10 @@ def create_app(config_path: str) -> FastAPI:
         except WakeFailed as e:
             log.warning("唤醒 %s 失败: %s", model, e)
             return _error(503, f"模型 {model} 唤醒失败，请稍后重试", "wake_failed", retry_after=10)
+        except SleepFailed as e:
+            # 旧模型睡不下去时绝不能继续唤醒：硬换必 OOM，OOM 会打死后端进程。
+            log.error("睡眠失败，已中止换台: %s", e)
+            return _error(503, f"显卡释放失败，已中止换台：{e}", "sleep_failed", retry_after=15)
         except DrainTimeout as e:
             # 上游规则：暂停没完成不许 sleep。这里拒绝换台而不是硬切，
             # 让客户端拿 503 重试（Retry-After 用一个 drain 周期的量级）。
@@ -297,6 +302,29 @@ def create_app(config_path: str) -> FastAPI:
         except RuntimeError as e:
             return JSONResponse({"detail": str(e)}, status_code=409)
         return JSONResponse({"ok": True, "model": model, "status": "asleep"})
+
+    @app.post("/admin/reconcile")
+    async def admin_reconcile(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+        """把网关状态与真实显存对齐：对指定模型（或全部）**无条件**发一次上游 sleep。
+
+        存在理由：网关重启、外部直接调过上游、OOM 后进程重启，都会让"网关以为睡着"
+        与"实际还占着显存"分叉。此时再唤醒别的模型就是 OOM。sleep 在上游是幂等的，
+        所以这里不做判断，直接睡一遍再把本地状态归零。
+        """
+        target = payload.get("model")
+        models = [target] if target else list(cfg.models)
+        unknown = [m for m in models if m not in cfg.models]
+        if unknown:
+            return JSONResponse({"detail": f"未知模型 {unknown}"}, status_code=404)
+        done, failed = [], []
+        for m in models:
+            try:
+                await sched.card_of(m).force_sleep(m)
+                done.append(m)
+            except Exception as e:  # 单卡失败不影响其它卡
+                failed.append({"model": m, "error": str(e)})
+        code = 200 if not failed else 207
+        return JSONResponse({"ok": not failed, "slept": done, "failed": failed}, status_code=code)
 
     return app
 

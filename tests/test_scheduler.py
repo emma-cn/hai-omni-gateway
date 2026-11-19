@@ -11,7 +11,7 @@ import time
 import pytest
 
 from conftest import base_cfg, multi_cfg
-from omni_gateway.scheduler import WakeFailed
+from omni_gateway.scheduler import DrainTimeout, SleepFailed, WakeFailed
 
 pytestmark = pytest.mark.asyncio
 
@@ -97,18 +97,38 @@ async def test_drain_waits_for_inflight_before_sleeping(gw):
         assert card.awake_model == B
 
 
-async def test_drain_timeout_switches_anyway(gw):
-    """drain 超时后只能继续换台，但必须真的换了（不能永远卡住）。"""
+async def test_drain_timeout_refuses_switch(gw):
+    """drain 超时后**必须拒绝换台**（上游规则：暂停没完成就不许 sleep）。
+
+    历史教训：旧实现打完一条 warning 就继续换台，等于把在飞请求连同引擎状态一起掐掉，
+    且事后无法复原（bug #1）。正确行为是抛 DrainTimeout → API 层 503 + Retry-After。
+    """
     raw = base_cfg()
     raw["cards"]["card4"]["drain_timeout_s"] = 0.1
     async with gw(raw) as g:
         card = g.sched.card_of(A)
         await card.acquire(A)
-        task = asyncio.create_task(card.acquire(B))
-        await asyncio.wait_for(task, timeout=3)
-        assert card.awake_model == B
-        assert g.backend.count("sleep") == 1
+        with pytest.raises(DrainTimeout):
+            await asyncio.wait_for(card.acquire(B), timeout=3)
+        # 关键断言：既没睡旧模型，也没唤醒新模型
+        assert card.awake_model == A, "drain 未完成却切走了旧模型"
+        assert g.backend.count("sleep") == 0, "drain 未完成却发起了 sleep"
         await card.release(A)  # 收尾
+
+
+async def test_sleep_failure_aborts_switch(gw):
+    """旧模型睡不下去时必须中止换台（bug #1：硬换 → 必 OOM → 打死后端进程）。"""
+    async with gw() as g:
+        card = g.sched.card_of(A)
+        await card.acquire(A)
+        await card.release(A)
+        g.backend.errors["sleep"] = (500, "CUDA out of memory")
+        wakes_before = g.backend.count("wakeup")
+        with pytest.raises(SleepFailed):
+            await card.acquire(B)
+        assert card.awake_model == A, "睡失败后仍把状态改成了 B"
+        assert g.backend.count("wakeup") == wakes_before, "睡失败后仍去唤醒新模型（必 OOM）"
+        await card.release(A)
 
 
 async def test_wakeup_failure_raises_and_clears_state(gw):
