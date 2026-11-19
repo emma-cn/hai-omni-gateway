@@ -124,27 +124,39 @@ async def test_acceptance_queue_limit_returns_429(gw):
             await first
 
 
-async def test_backpressure_missing_baseline(gw):
-    """现状基线：超并发不报错、不排队上限，只是等 —— 钉住，修好后要改成 429。"""
+@pytest.mark.xfail(strict=True, reason="未实现：P0-2 队列与背压 / 验收 A-201~A-203 —— 超过 queue_limit 应 429 而非无限等")
+async def test_acceptance_queue_over_limit_returns_429(gw):
+    """目标契约：队列满时必须 429（而不是让客户端无限等）。
+
+    与 `test_acceptance_queue_limit_returns_429` 的区别：那条测"concurrency 满 + queue_limit=1"，
+    这条测"没有 queue_limit 也应给背压"，两者都表达目标而非现状。
+    """
     raw = base_cfg()
     raw["models"][A]["concurrency"] = 1
+    raw["queue_limit"] = 1
     async with gw(raw) as g:
         g.backend.delays["speech"] = 0.3
         first = asyncio.create_task(g.client.post("/v1/audio/speech", json=speech_body(A)))
         await asyncio.sleep(0.05)
-        t0 = time.monotonic()
-        second = await g.client.post("/v1/audio/speech", json=speech_body(A))
-        waited = time.monotonic() - t0
+        second = await asyncio.wait_for(
+            g.client.post("/v1/audio/speech", json=speech_body(A)), timeout=2.0
+        )
         await first
-        assert second.status_code == 200        # 排队后成功
-        assert waited >= 0.2                    # 确实等了前一条
+        assert second.status_code == 429, "队列满却让客户端干等（无背压）"
 
 
 # ------------------------------------------------------ 无鉴权现状（安全基线）
 
 
-async def test_acceptance_admin_surface_has_no_auth(gw):
-    """现状：/admin/* 无任何鉴权（README 把鉴权列为 TODO）—— 内网谁都能把模型睡掉。"""
+@pytest.mark.xfail(strict=True, reason="未实现：P0-1 鉴权与多租户 / 验收 A-101~A-104 —— 运维面应要求 admin token")
+async def test_acceptance_admin_surface_requires_auth(gw):
+    """目标契约：`/admin/*` 无凭据必须 401。
+
+    这条用例表达的是**目标**，不是现状。历史教训：早期版本写成
+    `assert r.status_code == 200, "管理面竟然有鉴权？那就更新这条基线"`，
+    等于把缺陷钉成期望值——等鉴权真落地时，这句模糊指引最可能被执行成"把鉴权回退掉"。
+    `xfail(strict=True)` 保证鉴权落地后这条自动变红，逼人删标记而不是删功能。
+    """
     async with gw() as g:
         r = await g.client.post("/admin/sleep", json={"model": A})
-        assert r.status_code == 200, "管理面竟然有鉴权？那就更新这条基线"
+        assert r.status_code == 401, "运维面没有鉴权：任何客户端都能把模型睡掉"

@@ -35,6 +35,14 @@ docker/                        Dockerfile + compose（network_mode: host）
 
 ## 验收
 
+- **本仓库的 `tests/` 只是快速信号**（CI 跑，防回归）；**"DONE" 只认产品侧的
+  `scripts/accept.sh`**（黑盒、对真环境、跨重启）。别把仓库内用例当成验收结论。
+- 但仓库内用例**不许表达与产品契约相反的东西**：
+  - 任何"现状如此"的基线用例，必须写成**目标断言** + `@pytest.mark.xfail(strict=True)`，
+    `reason` 里必须能搜到需求 ID（`P0-x`）或验收 ID（`A-xxx`）；
+  - 反例（历史教训）：`assert r.status_code == 200, "管理面竟然有鉴权？那就更新这条基线"`
+    —— 把缺陷钉成期望值，等鉴权真落地时，这句模糊指引最可能被执行成"把鉴权回退掉"。
+
 - 验收脚本在开发侧之外（产品经理持有），本仓库只需保证：
   `pip install -e ".[dev]" && ruff check src && python -c "from omni_gateway.config import GatewayConfig; GatewayConfig.load('config/gateway.example.yaml')"`
   能过。
