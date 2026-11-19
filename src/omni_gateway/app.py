@@ -29,7 +29,7 @@ from fastapi import Body, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from . import __version__
-from .auth import AuthError, Authenticator
+from .auth import Authenticator, AuthError
 from .config import GatewayConfig
 from .scheduler import (
     BackendUnavailable,
