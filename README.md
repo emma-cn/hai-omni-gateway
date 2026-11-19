@@ -110,19 +110,38 @@ causvid_wan / hunyuan_video_15 / wan2_2          视频
 注意 **H3 的 PD 分离变体**（`*_disaggregated*`）是两段部署、可能跨卡，`stage_ids` 要写 `[0,1]`，
 且它基本吃满一张卡甚至多张——所以这类模型应该 `ttl_s: 0`（不自动睡）+ 独占卡。
 
-## 运行
+## 运行（容器）
 
 ```bash
-# 1) 配置
-cp config/gateway.example.yaml config/gateway.yaml   # 按实际端口/卡位改
+cp config/gateway.example.yaml config/gateway.yaml     # 按实际端口/卡位改
+docker compose -f docker/compose/docker-compose.yml up -d --build
+# 浏览器打开  http://<host>:8080/ui
+```
 
-# 2) 本地跑
+`network_mode: host`：网关本身不占 GPU，但要直连本机的 vllm-omni 端口。
+容器启动时会对账（把所有后端睡一遍再归零），因为网关是这张卡的唯一调度者——
+不归零就会出现"以为都睡着、实际有模型醒着"，一唤醒就 OOM。
+
+本地开发也可以直接跑：
+
+```bash
 pip install -e .
 OMNI_GATEWAY_CONFIG=config/gateway.yaml python -m omni_gateway
-
-# 3) 或者用容器（host 网络，直连本机 vllm-omni 端口）
-docker compose -f docker/compose/docker-compose.yml up -d
 ```
+
+## 管理页 `/ui`
+
+单页控制台，管理 + 测试合一：
+
+- **显卡卡片**：每张卡当前醒着谁、在飞的请求数、`min_dwell`
+- **模型表**：状态（醒着/睡眠）、能力、在飞数、TTL，带「唤醒 / 睡眠」按钮
+  （睡眠按钮在有在飞请求时会被禁用，避免掐掉用户请求）
+- **事件流**：`wake / sleep / switch / idle_sleep / fail / reconcile`，带时间戳
+- **测试区**：选模型 → 输文本 →（可选）上传参考音频或填容器内路径 → 合成 →
+  在线试听 + 下载，并显示耗时；模型睡着时会自动唤醒
+- 每 2 秒轮询 `/admin/state`，无需手动刷新
+
+接口：`GET /admin/state`、`POST /admin/wake {model}`、`POST /admin/sleep {model}`。
 
 ## 验收标准
 

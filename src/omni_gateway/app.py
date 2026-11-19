@@ -20,11 +20,12 @@ import contextlib
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi import Body, FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from . import __version__
 from .config import GatewayConfig
@@ -87,6 +88,9 @@ def create_app(config_path: str) -> FastAPI:
         caps = sorted({c for m in cfg.models.values() for c in m.capabilities})
         log.info("hai-omni-gateway %s 启动：%d 张卡 / %d 个模型 / 能力 %s",
                  __version__, len(cfg.cards), len(cfg.models), caps)
+        # 启动对账：把后端全部睡一遍再归零，避免"以为都睡着、实际有模型醒着"导致唤醒 OOM
+        await sched.reconcile()
+        log.info("启动对账完成：全部模型已置为睡眠态")
         try:
             yield
         finally:
@@ -222,6 +226,68 @@ def create_app(config_path: str) -> FastAPI:
     @app.get("/v1/videos/{video_id}/content")
     async def videos_content(video_id: str, request: Request) -> Response:
         return await _dispatch(request)
+
+    # ------------------------------------------------------------ 管理页
+    _UI = Path(__file__).with_name("static") / "ui.html"
+
+    @app.get("/ui", include_in_schema=False)
+    async def ui() -> Response:
+        if not _UI.exists():
+            return JSONResponse({"error": "ui.html 缺失"}, status_code=500)
+        return FileResponse(_UI, media_type="text/html; charset=utf-8")
+
+    @app.get("/")
+    async def root() -> Response:
+        return JSONResponse({
+            "service": "hai-omni-gateway",
+            "version": __version__,
+            "ui": "/ui",
+            "docs": "/docs",
+            "models": sorted(cfg.models),
+        })
+
+    @app.get("/admin/state")
+    async def admin_state() -> dict[str, Any]:
+        return {
+            "version": __version__,
+            "cards": [card.stats() for card in sched.cards.values()],
+            "models": [
+                {
+                    "name": name,
+                    "card": m.card,
+                    "capabilities": m.capabilities,
+                    "status": sched.card_of(name).state(name),
+                    "inflight": sched.card_of(name).inflight(name),
+                    "ttl_s": m.ttl_s,
+                    "lease_s": m.lease_s,
+                    "concurrency": m.concurrency,
+                    "base_url": m.base_url,
+                }
+                for name, m in cfg.models.items()
+            ],
+        }
+
+    @app.post("/admin/wake")
+    async def admin_wake(payload: dict[str, Any] = Body(...)) -> JSONResponse:
+        model = payload.get("model")
+        if model not in cfg.models:
+            return JSONResponse({"detail": f"未知模型 {model}"}, status_code=404)
+        try:
+            await sched.card_of(model).force_wake(model)
+        except WakeFailed as e:
+            return JSONResponse({"detail": f"唤醒失败: {e}"}, status_code=503)
+        return JSONResponse({"ok": True, "model": model, "status": "awake"})
+
+    @app.post("/admin/sleep")
+    async def admin_sleep(payload: dict[str, Any] = Body(...)) -> JSONResponse:
+        model = payload.get("model")
+        if model not in cfg.models:
+            return JSONResponse({"detail": f"未知模型 {model}"}, status_code=404)
+        try:
+            await sched.card_of(model).force_sleep(model)
+        except RuntimeError as e:
+            return JSONResponse({"detail": str(e)}, status_code=409)
+        return JSONResponse({"ok": True, "model": model, "status": "asleep"})
 
     return app
 

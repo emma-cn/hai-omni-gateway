@@ -4,7 +4,8 @@ name: hai-omni-gateway
 services:
   gateway:
     build:
-      context: ..
+      # compose 文件在 docker/compose/ 下，所以 context 要退两级到仓库根
+      context: ../..
       dockerfile: docker/Dockerfile
     image: hai-omni-gateway:0.1.0
     container_name: hai-omni-gateway
@@ -14,4 +15,4 @@ services:
       OMNI_GATEWAY_CONFIG: /app/config/gateway.yaml
       LOG_LEVEL: INFO
     volumes:
-      - ../config/gateway.yaml:/app/config/gateway.yaml:ro
+      - ../../config/gateway.yaml:/app/config/gateway.yaml:ro
