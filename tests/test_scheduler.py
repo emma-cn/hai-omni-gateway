@@ -131,6 +131,23 @@ async def test_sleep_failure_aborts_switch(gw):
         await card.release(A)
 
 
+async def test_reconcile_sleep_other_model_keeps_awake_state(gw):
+    """对账睡眠"非当前醒着"的模型时，不能把卡上真正醒着的模型抹掉（#11）。
+
+    历史 bug：force_sleep 在"本地状态说该模型睡着"的分支里无条件 `_awake = None`，
+    于是给 B 补一发 sleep 会把 A 的醒着状态抹掉 → 下一个请求以为卡空、直接唤醒新模型
+    → 与仍在显存里的 A 撞车（OOM）。回归用：awake=A 时对账 B，A 必须仍是 awake。
+    """
+    async with gw() as g:
+        card = g.sched.card_of(A)
+        await card.acquire(A)
+        await card.release(A)
+        assert card.awake_model == A
+        await card.force_sleep(B)          # 对账一个"网关切睡"的模型
+        assert card.awake_model == A, "对账 B 把卡上醒着的 A 抹掉了（#11 回归）"
+        assert g.backend.count("sleep") == 1, "应当仍向上游补发了 B 的 sleep"
+
+
 async def test_idle_sleep_backoff_suppresses_retry_then_recovers(gw):
     """空闲睡失败后要退避，但退避过期必须重试。
 

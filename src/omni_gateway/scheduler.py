@@ -311,11 +311,13 @@ class Card:
         """
         async with self._lock:
             if self._awake != model and self._inflight.get(model, 0) == 0:
-                # 状态可能失真：照样向上一游补一发 sleep，然后把状态归零
+                # 状态可能失真：照样向上游补一发 sleep（幂等）。
+                # 但**绝不能**动 self._awake —— 卡上醒着的是别的模型，
+                # 把它抹成 None 等于让网关失忆：下一个请求会以为卡是空的、
+                # 直接唤醒新模型 → 与仍在显存里的模型撞车（测试报的 #11）。
                 ok, err = await self.client.sleep(self.models[model])
                 self._event("reconcile_sleep" if ok else "fail", model,
                             "" if ok else f"reconcile_sleep: {err}")
-                self._awake = None
                 if not ok:
                     raise RuntimeError(f"对账睡眠失败: {err}")
                 return
