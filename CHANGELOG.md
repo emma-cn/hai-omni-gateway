@@ -16,6 +16,18 @@
 - 长任务租约：job 表 + `lease_s` 记账、`Idempotency-Key` 去重
 - 请求账本：每请求一行 JSONL，**排队/唤醒/生成三段耗时分开记**
 
+## [0.1.3] - 2026-11-20
+
+### Added
+- **失败三分类（P0-3 前置）**：`backend_unavailable` → 502、`wake_oom` → 503 + Retry-After、
+  `bad_request` → 400。此前一律 `wake_failed` 503，把"进程已死"和"显存不够"混为一谈
+- 后端"进程级不可用"15s 冷却：冷却期内直接快速失败，不再反复唤醒死进程
+
+### 实测
+- 真机：停掉 voxcpm2 后端后，第一个请求 **502 `backend_unavailable`（5.6 ms）**；
+  第二个请求命中冷却 **502（0.5 ms）**，未再打后端；恢复后端 50s 后自动可用
+- pytest：92 passed, 4 xfailed
+
 ## [0.1.2] - 2026-11-20
 
 ### Fixed
