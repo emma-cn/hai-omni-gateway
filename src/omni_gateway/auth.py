@@ -96,16 +96,37 @@ class Authenticator:
         self._buckets: dict[str, _Bucket] = {}
 
     # ------------------------------------------------------------- 来源判定
-    def client_is_loopback(self, peer: str | None, xff: str | None) -> bool:
-        """判定"这个请求是不是真的来自本机"。
+    def effective_client_ip(self, peer: str | None, xff: str | None) -> str:
+        """推算出"真实客户端地址"，只信自己代理写的那一段。
 
-        只有 peer 属于 trusted_proxies 时才采纳 X-Forwarded-For——
-        否则任何客户端都能伪造 `X-Forwarded-For: 127.0.0.1` 绕过鉴权。
+        规则（这是 X-Forwarded-For 的标准用法，取错一段就是漏洞）：
+          1. 只有 **peer 本身在 trusted_proxies 里**（即请求确实来自我们自己的反代）
+             才看 XFF；否则 XFF 完全忽略，直接用 peer。
+          2. 看 XFF 时**从右往左**走，跳过可信代理，第一个不可信地址才是真实客户端。
+             因为 nginx 的 `$proxy_add_x_forwarded_for` 是**追加**在右边，
+             最左边那段是客户端自己填的、可以随便伪造。
+
+        历史 bug（issue #12）：早前取 `xff.split(",")[0]`（最左段）+ `trusted_proxies`
+        默认含 127.0.0.1，于是任意客户端带 `X-Forwarded-For: 127.0.0.1` 就能免 key 通过。
         """
         peer = (peer or "").strip()
-        if peer in self.cfg.trusted_proxies and xff:
-            peer = xff.split(",")[0].strip()
-        return peer in set(getattr(self.cfg, "loopback_peers", None) or ("127.0.0.1", "::1", "localhost"))
+        trusted = set(getattr(self.cfg, "trusted_proxies", None) or ())
+        if not trusted or peer not in trusted:
+            return peer
+        hops = [h.strip() for h in (xff or "").split(",") if h.strip()]
+        if not hops:
+            return peer
+        for hop in reversed(hops):
+            if hop in trusted:
+                continue
+            return hop
+        # 整条链都是可信代理（极端情况）：退回最左段
+        return hops[0]
+
+    def client_is_loopback(self, peer: str | None, xff: str | None) -> bool:
+        """判定"这个请求是不是真的来自本机"。"""
+        client = self.effective_client_ip(peer, xff)
+        return client in set(getattr(self.cfg, "loopback_peers", None) or ("127.0.0.1", "::1", "localhost"))
 
     # ------------------------------------------------------------- key 提取
     @staticmethod

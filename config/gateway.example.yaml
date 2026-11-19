@@ -28,7 +28,10 @@ auth:
   # 运维面是否也免 token。默认 false —— 本机其它进程/SSH 隧道都能发 loopback 请求，
   # 一个匿名 /admin/sleep 就能把模型睡掉。只有 dev 环境才建议打开。
   admin_loopback_bypass: false
-  trusted_proxies: ["127.0.0.1", "::1"]
+  # 信任哪些反代来源。**默认空 = 完全不看 X-Forwarded-For**。
+  # 只有你确实在前面放了 nginx 之类（且它用 $proxy_add_x_forwarded_for 追加）时才填它的地址。
+  # 填 127.0.0.1 意味着"本机任何进程都能冒充任意客户端"（issue #12 就是这么来的）。
+  trusted_proxies: []
 
   keys:
     # 值本身写在配置里不安全，生产请用 key_env 指向环境变量。

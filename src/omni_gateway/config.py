@@ -95,7 +95,10 @@ class AuthConfig:
     # 一个匿名 GET /admin/sleep 就能把模型睡掉，代价太大。
     # 本地调试想省事就把这个打开（只在 dev 环境）。
     admin_loopback_bypass: bool = False
-    trusted_proxies: list[str] = field(default_factory=lambda: ["127.0.0.1", "::1"])
+    # **默认空**：不信任任何 X-Forwarded-For。只有你确实在前面放了反代（且它会
+    # 覆盖/追加 XFF）时，才把反代地址填进来。默认填 127.0.0.1 等于让本机任何进程
+    # 冒充任意客户端（issue #12）。
+    trusted_proxies: list[str] = field(default_factory=list)
     # 哪些 peer 地址算"本机"。测试环境里 ASGI transport 的 peer 是 "testclient"，
     # 所以这里做成可配置而不是硬编码——但默认值只含真 loopback。
     loopback_peers: list[str] = field(default_factory=lambda: ["127.0.0.1", "::1", "localhost"])
@@ -149,7 +152,7 @@ class GatewayConfig:
             admin_token_env=auth_raw.get("admin_token_env", "OMNI_ADMIN_TOKEN"),
             loopback_bypass=bool(auth_raw.get("loopback_bypass", True)),
             admin_loopback_bypass=bool(auth_raw.get("admin_loopback_bypass", False)),
-            trusted_proxies=list(auth_raw.get("trusted_proxies") or ["127.0.0.1", "::1"]),
+            trusted_proxies=list(auth_raw.get("trusted_proxies") or []),
             loopback_peers=list(auth_raw.get("loopback_peers") or ["127.0.0.1", "::1", "localhost"]),
             keys=keys,
         )

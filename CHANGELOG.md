@@ -25,6 +25,30 @@
   GitHub 上的 `v0.1.2`（bump 提交）内容不同却同号，即"同号不同内容"。
 - 已发布各号的内容：`v0.1.0 = 6f4131c7`、`v0.1.1 = a8bad3f5`、`v0.1.2 = d534ebca`、`v0.1.3 = 07a03783`。
 
+## [0.1.7] - 2026-11-20
+
+### Security
+- **修 `X-Forwarded-For` 绕过鉴权（issue #12，测试实测提出）**
+  - 旧实现取 XFF 的**最左段**——而 nginx 的 `$proxy_add_x_forwarded_for` 是把真实客户端
+    **追加在右边**，最左边那段是客户端自己填的、可任意伪造；
+  - `trusted_proxies` 旧默认含 `127.0.0.1`，于是本机任何进程都能冒充"来自本机"。
+  - 现在：① 只有 peer 本身在 `trusted_proxies` 里才看 XFF；② 看 XFF 时**从右往左**
+    跳过可信代理，第一个不可信地址才算真实客户端；③ `trusted_proxies` **默认空**。
+
+### 实测（真机，非 loopback 地址 + 伪造头）
+```
+LAN 直连无 key                   -> 401
+LAN + X-Forwarded-For: 127.0.0.1 -> 401
+LAN + XFF: 127.0.0.1, 127.0.0.1   -> 401
+LAN + 正确 key（对照）            -> 200
+loopback 直连（对照）             -> 200
+```
+- pytest：105 passed, 4 xfailed（新增 `test_a106_spoofed_xff_cannot_bypass_key`）
+
+### 说明
+- 若你确实在网关前放了反代，需要把反代地址填进 `auth.trusted_proxies`，
+  否则所有请求都会被当成"来自反代地址本身"。
+
 ## [0.1.6] - 2026-11-20
 
 ### Changed

@@ -105,6 +105,34 @@ async def test_a103_admin_sleep_requires_auth_before_model_validation(gw):
         assert r.status_code == 401, "必须先鉴权，再校验模型（否则泄露模型存在性）"
 
 
+async def test_a106_spoofed_xff_cannot_bypass_key(gw):
+    """A-106（issue #12）：伪造 X-Forwarded-For 不能绕过鉴权。
+
+    两层都要挡住：
+      1. peer 不可信时，XFF 根本不该被采纳；
+      2. peer 可信时，也只认**最右**不可信段（nginx 追加的那段），
+         最左段是客户端自己填的、可任意伪造。
+    """
+    # 1) 外部客户端伪造 XFF
+    raw = external_cfg()
+    async with gw(raw, client_host=EXTERNAL_HOST) as g:
+        r = await g.client.get("/v1/models", headers={"x-forwarded-for": "127.0.0.1"})
+        assert r.status_code == 401, "伪造 XFF 绕过了鉴权"
+        r2 = await g.client.get("/v1/models", headers={"x-forwarded-for": "127.0.0.1, 127.0.0.1"})
+        assert r2.status_code == 401
+
+    # 2) 请求确实来自可信反代，但 XFF 左边塞了伪造值
+    raw = external_cfg(trusted_proxies=["127.0.0.1"], admin_token="adm-1")
+    async with gw(raw, client_host="127.0.0.1") as g:
+        spoof = await g.client.get(
+            "/v1/models", headers={"x-forwarded-for": "127.0.0.1, 203.0.113.9"}
+        )
+        assert spoof.status_code == 401, "取 XFF 最左段 = 客户端可自证为本机（#12）"
+        # 反代后面真的来自本机时应当免 key
+        real = await g.client.get("/v1/models", headers={"x-forwarded-for": "127.0.0.1"})
+        assert real.status_code == 200
+
+
 async def test_a104_wrong_key_is_401_and_leaks_nothing(gw):
     """A-104：错误 key → 401，且响应里不能出现模型清单。"""
     raw = external_cfg(keys=[{"name": "t", "key": "sk-test-1"}])
