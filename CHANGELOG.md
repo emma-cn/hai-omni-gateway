@@ -25,6 +25,19 @@
   GitHub 上的 `v0.1.2`（bump 提交）内容不同却同号，即"同号不同内容"。
 - 已发布各号的内容：`v0.1.0 = 6f4131c7`、`v0.1.1 = a8bad3f5`、`v0.1.2 = d534ebca`、`v0.1.3 = 07a03783`。
 
+## [0.1.6] - 2026-11-20
+
+### Changed
+- **运维面默认不再信任 loopback**：`/admin/*`、`/ui`、`/metrics` 永远需要 admin token
+  （`auth.admin_loopback_bypass` 默认 `false`）。理由：本机其它进程、SSH 隧道、浏览器插件
+  都能发 loopback 请求，一个匿名 `POST /admin/sleep` 就能把模型睡掉。
+  验收 A-102/A-103 正是从 127.0.0.1 打的，就是这个口径。
+- `GET /ui?token=<admin token>` 支持浏览器场景（只对运维面生效）
+
+### 实测
+- 验收矩阵：**A-101 / A-102 / A-103 / A-104 全 PASS**；总 PASS 15（原 13）
+- pytest：104 passed, 4 xfailed
+
 ## [0.1.5] - 2026-11-20
 
 ### Added
