@@ -131,6 +131,32 @@ async def test_sleep_failure_aborts_switch(gw):
         await card.release(A)
 
 
+async def test_idle_sleep_backoff_suppresses_retry_then_recovers(gw):
+    """空闲睡失败后要退避，但退避过期必须重试。
+
+    回归用例：早期实现用 `_last_idle_fail = 0.0` 当哨兵，在 monotonic 起点很小的环境
+    （CI 容器里只有零点几秒）会让第一次判断就成立，空闲睡被永久跳过 —— 本地因为
+    开机时长大反而看不出来。
+    """
+    raw = base_cfg()
+    raw["models"][A]["ttl_s"] = 0.05
+    async with gw(raw) as g:
+        card = g.sched.card_of(A)
+        await card.acquire(A)
+        await card.release(A)
+        g.backend.errors["sleep"] = (500, "boom")
+        await asyncio.sleep(0.1)
+        await card.sleep_if_idle()               # 第 1 次：真尝试并失败
+        assert g.backend.count("sleep") == 1, "首次就该尝试 sleep（哨兵把第一次也挡了）"
+        g.backend.errors.pop("sleep", None)
+        await card.sleep_if_idle()               # 退避期内：不重试
+        assert g.backend.count("sleep") == 1, "退避期内仍重试了"
+        card._last_idle_fail = None              # 模拟退避过期
+        await card.sleep_if_idle()               # 过期后：重试并成功
+        assert g.backend.count("sleep") == 2
+        assert card.awake_model is None
+
+
 async def test_queue_full_raises_when_limit_reached(gw):
     """排队人数超过 queue_limit → QueueFull（API 层 429），而不是继续排。"""
     raw = base_cfg()

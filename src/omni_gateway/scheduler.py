@@ -91,7 +91,10 @@ class Card:
         self._cond: dict[str, asyncio.Condition] = {n: asyncio.Condition() for n in models}
         self._waiting: dict[str, deque[int]] = {n: deque() for n in models}
         self._seq = 0
-        self._last_idle_fail = 0.0
+        # 用 None 而不是 0.0 当"从未失败"的哨兵：
+        # time.monotonic() 的起点随环境而变（CI 容器里可能只有零点几秒），
+        # 拿 0.0 比较会让 `monotonic() - 0.0 < 30` 恒真 → 空闲睡永远被跳过。
+        self._last_idle_fail: float | None = None
         self._idle_fail_backoff_s = 30.0
         # 事件环：给管理页展示"谁什么时候被唤醒/睡下/失败"
         self.events: deque[dict[str, Any]] = deque(maxlen=200)
@@ -272,13 +275,16 @@ class Card:
             # 退避：上一次空闲睡失败过就先别急着重试。
             # 实测教训：不加退避时每 5s 重试一次，把后端打成 ReadError 风暴，
             # 日志刷屏且掩盖真实原因（当时真因是容器没开 --enable-sleep-mode）。
-            if time.monotonic() - getattr(self, "_last_idle_fail", 0.0) < self._idle_fail_backoff_s:
+            if (
+                self._last_idle_fail is not None
+                and time.monotonic() - self._last_idle_fail < self._idle_fail_backoff_s
+            ):
                 return
             log.info("card %s: %s 空闲超过 %.0fs，睡下", self.cfg.name, cur, m.ttl_s)
             ok, err = await self.client.sleep(m)
             if ok:
                 self._awake = None
-                self._last_idle_fail = 0.0
+                self._last_idle_fail = None
                 self._event("idle_sleep", cur, f"ttl={m.ttl_s:.0f}s")
             else:
                 self._last_idle_fail = time.monotonic()
