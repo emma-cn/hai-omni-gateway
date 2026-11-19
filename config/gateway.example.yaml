@@ -1,0 +1,47 @@
+# hai-omni-gateway 配置示例
+#
+# 模型名 = 客户端请求里 model 字段的值 = vllm-omni 实际服务的名字。
+# 不做任何改写（llama-swap 的教训：model 是受保护字段，最省事的做法是名字对齐）。
+#
+# 卡（card）是调度单位：同一张卡上同一时刻只允许一个模型醒着。
+
+listen: 0.0.0.0:8080
+queue_limit: 200
+
+cards:
+  card4:                 # 13.1 唯一的 4090；node3 上就是 4/5/6/7 号卡
+    min_dwell_s: 20      # 醒着至少驻留 20s 才允许被挤掉（防 A/B 交替抖动）
+    drain_timeout_s: 10  # 换台前等在途请求清零的上限
+
+models:
+  "/models/IndexTTS-2.5":
+    base_url: http://127.0.0.1:60589
+    card: card4
+    stage_ids: [0, 1]
+    sleep_level: 1
+    wake_timeout_s: 60
+    request_timeout_s: 120
+    ttl_s: 600
+    concurrency: 4      # 对齐 vllm 的 max_num_seqs
+
+  "/models/VoxCPM2":
+    base_url: http://127.0.0.1:60592
+    card: card4
+    stage_ids: [0]
+    sleep_level: 1
+    wake_timeout_s: 60
+    request_timeout_s: 120
+    ttl_s: 300
+    concurrency: 8      # 对齐 vllm 的 max_num_seqs
+
+  # "/models/MOSS-SoundEffect":
+  #   base_url: http://127.0.0.1:60594
+  #   card: card5
+  #   stage_ids: [0, 1]
+  #   concurrency: 4
+  #
+  # "/models/Step-Audio-2-mini":
+  #   base_url: http://127.0.0.1:60596
+  #   card: card6
+  #   stage_ids: [0]
+  #   concurrency: 4

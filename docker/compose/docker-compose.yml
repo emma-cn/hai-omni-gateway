@@ -1,0 +1,17 @@
+name: hai-omni-gateway
+
+# 网关只做 HTTP 路由/调度，不占 GPU；用 host 网络直连本机的 vllm-omni 端口
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: hai-omni-gateway:0.1.0
+    container_name: hai-omni-gateway
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      OMNI_GATEWAY_CONFIG: /app/config/gateway.yaml
+      LOG_LEVEL: INFO
+    volumes:
+      - ../config/gateway.yaml:/app/config/gateway.yaml:ro

@@ -1,0 +1,28 @@
+[project]
+name = "hai-omni-gateway"
+version = "0.1.0"
+description = "vllm-omni 音频栈的统一入口网关：OpenAI 兼容接口 + 卡级调度 + 请求队列"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.5"]
+
+[project.scripts]
+omni-gateway = "omni_gateway.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
