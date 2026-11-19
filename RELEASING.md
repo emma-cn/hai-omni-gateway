@@ -12,6 +12,15 @@ v0.1.<build>-maint 当天没有任何验收用例 FAIL→PASS，仅维护性改�
 - **永不回退、永不复用**。发出去过的号，即使 tag 被删掉也不再使用——否则客户端日志里的版本号会指向两个不同的东西。
 - 版本号与镜像 tag、`/healthz` 的 `build` 字段三者**必须一致**，且都由同一个 tag 推导（见 `release.yml` 的断言）。
 
+## 装钩子（每个 clone 一次）
+
+```bash
+bash scripts/install-hooks.sh
+```
+
+之后每次 `git commit` 前都会跑敏感闸门（扫整个工作树，含 untracked）。**这一步不能只靠 CI**：
+CI 在 push 之后才跑，等它红的时候内网 IP/域名已经进了远端历史，公开仓收不回来。
+
 ## 一次发版
 
 ```bash

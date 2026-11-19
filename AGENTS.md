@@ -23,6 +23,9 @@ docker/                        Dockerfile + compose（network_mode: host）
 
 ## 施工规则
 
+0. **装钩子**：`bash scripts/install-hooks.sh`（每 clone 一次）。敏感闸门在 pre-commit 跑，
+   扫整个工作树含 untracked —— CI 只扫"已经进了远端"的内容，那时已经晚了。
+
 1. **配置项不许空挂**：往 `config/gateway.example.yaml` 加一个键，必须同时有读取它的代码和一条
    验收断言；否则启动时报错，别静默忽略。
 2. **改调度前先读 `docs/DESIGN.md`**：那里有"为什么必须两段唤醒"「drain 不能 abort」这类

@@ -59,14 +59,14 @@ done < <(grep -InoE '([0-9]{1,3}\.){3}[0-9]{1,3}' "${FILES[@]}" 2>/dev/null || t
 run_grep '疑似密钥' '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
 
 # 3) 内网域名 / 私有后缀
-run_grep '内网域名' '(imar\.xin|\.internal\b|\.corp\b|\.lan\b|\.localdomain\b)'
+run_grep '内网域名' '(imar\.xin|migudm\.cn|\.internal\b|\.corp\b|\.lan\b|\.localdomain\b)'
 
 # 4) 开发机绝对路径
-run_grep '绝对路径' '(^|[[:space:]"'"'"'(=:])(/home/[a-z][A-Za-z0-9._-]*/|/Users/[A-Za-z][A-Za-z0-9._-]*/|/root/|/mnt/[a-z])'
+run_grep '绝对路径' '(^|[[:space:]"'"'"'(=:])(/home/[a-z][A-Za-z0-9._-]*/|/Users/[A-Za-z][A-Za-z0-9._-]*/|/root/|/mnt/[a-z]|/nas/)'
 
 if [ "$HISTORY" = 1 ]; then
   echo "[信息] 扫 git 历史（转 public 前必须跑一次）"
-  hist="$(git log -p --all 2>/dev/null | grep -InE '([0-9]{1,3}\.){3}[0-9]{1,3}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|imar\.xin|/home/[a-z][A-Za-z0-9._-]*/|/Users/[A-Za-z][A-Za-z0-9._-]*/' || true)"
+  hist="$(git log -p --all 2>/dev/null | grep -InE '([0-9]{1,3}\.){3}[0-9]{1,3}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|imar\.xin|migudm\.cn|/home/[a-z][A-Za-z0-9._-]*/|/Users/[A-Za-z][A-Za-z0-9._-]*/' || true)"
   if [ -n "$hist" ]; then
     # 历史里白名单 IP 不报
     hist="$(printf '%s\n' "$hist" | grep -vE '(127\.0\.0\.1|0\.0\.0\.0|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)' || true)"

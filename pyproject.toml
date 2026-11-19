@@ -1,6 +1,6 @@
 [project]
 name = "hai-omni-gateway"
-version = "0.1.1"
+dynamic = ["version"]
 description = "vllm-omni 音频栈的统一入口网关：OpenAI 兼容接口 + 卡级调度 + 请求队列"
 requires-python = ">=3.11"
 dependencies = [
@@ -19,6 +19,10 @@ omni-gateway = "omni_gateway.app:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+# 版本从代码里读，保证 `__version__`、包元数据、/healthz 三处永远一致
+[tool.setuptools.dynamic]
+version = {attr = "omni_gateway.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
