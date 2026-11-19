@@ -35,6 +35,12 @@ docker/                        Dockerfile + compose（network_mode: host）
 5. **不提交敏感信息**：内网 IP、主机名、绝对路径、密钥一律不进仓库；示例配置用 `127.0.0.1`。
 6. **提交信息写清"跑了什么"**：跑了哪些命令、手 break 了什么、哪些**没**验。大改动必须附输出。
 7. **每个 tag 等一次绿灯**：CI 没过不许打 tag；tag 不通过就不要发版。
+8. **改完 `src/` 必须 `scripts/deploy-dev.sh` 才算交付**：`src/` 是 COPY 进镜像的，
+   只 `docker restart` 跑的仍是旧代码——源码类验收 PASS、行为类验收 FAIL 会同时成立，最难查。
+   部署脚本会断言 `/healthz` 的 `build` 等于本次 tag。
+9. **版本号纪律**：正式号 `x.y.z` 只能由 `scripts/release.sh`（→ `release.yml`）产出；
+   dev 构建不得占用正式号（`deploy-dev.sh` 会自动改写成 `x.y.z-dev-<sha>`）。
+   已出现过"本地镜像 0.1.2 与 GitHub v0.1.2 内容不同却同号"，事后无法分辨。
 
 ## 验收
 
