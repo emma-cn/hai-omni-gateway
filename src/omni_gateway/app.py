@@ -20,8 +20,9 @@ import contextlib
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 from fastapi import Body, FastAPI, Request
@@ -29,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 
 from . import __version__
 from .config import GatewayConfig
-from .scheduler import Scheduler, WakeFailed
+from .scheduler import DrainTimeout, Scheduler, WakeFailed
 from .upstream import OmniClient
 
 log = logging.getLogger(__name__)
@@ -107,6 +108,9 @@ def create_app(config_path: str) -> FastAPI:
         return {
             "status": "ok",
             "version": __version__,
+            # build 由镜像/发布流水线注入（OMNI_BUILD），必须等于镜像 tag 后缀；
+            # 没注入时退回版本号，便于本地裸跑。
+            "build": os.environ.get("OMNI_BUILD") or __version__,
             "cards": {name: {"awake": card.awake_model} for name, card in sched.cards.items()},
         }
 
@@ -139,6 +143,11 @@ def create_app(config_path: str) -> FastAPI:
         except WakeFailed as e:
             log.warning("唤醒 %s 失败: %s", model, e)
             return _error(503, f"模型 {model} 唤醒失败，请稍后重试", "wake_failed", retry_after=10)
+        except DrainTimeout as e:
+            # 上游规则：暂停没完成不许 sleep。这里拒绝换台而不是硬切，
+            # 让客户端拿 503 重试（Retry-After 用一个 drain 周期的量级）。
+            log.warning("拒绝换台（drain 未完成）: %s", e)
+            return _error(503, f"显卡正忙，换台被拒绝：{e}", "drain_timeout", retry_after=5)
 
         released = False
 

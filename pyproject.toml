@@ -29,3 +29,17 @@ omni_gateway = ["static/*.html"]
 [tool.ruff]
 line-length = 110
 target-version = "py311"
+
+# 只开"一定会错"的集合，不把风格规则强加给既有代码。
+# 明确不开的（理由写在这里，免得后人以为是漏配）：
+#   BLE001 —— 网关对上游的每一条调用都必须宽捕获（连接失败/超时/协议异常都要降级成 503），
+#             窄化 except 会漏掉 httpx 的传输层异常。
+#   B008   —— FastAPI 的 `Body(...)` 是框架惯用法，官方文档即如此。
+#   ALL    —— 不做"全规则一夜清零"，那只会逼人写一堆 noqa。
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# 脚本目录可执行位在 Windows 检出不保留，EXE001 会误报
+"scripts/*.py" = ["EXE001"]
+"tests/*.py" = ["E402"]

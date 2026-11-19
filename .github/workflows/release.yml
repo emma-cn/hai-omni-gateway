@@ -1,0 +1,87 @@
+name: release
+
+# magpie 式的发版纪律：
+#   1. tag 只能由本工作流（或 scripts/next_version.sh 算号后手工打）产生，号只增不减
+#   2. 打 tag 时**重跑一遍全量验证**——不信任"我本地过了"
+#   3. 镜像 tag == /healthz 的 build 字段，二者必须由同一个 tag 推导
+#   4. Release 正文取自 CHANGELOG（改了什么 / 跑了什么 / 已知问题）
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（留空则用当前 ref）"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: 发布前验证（闸门/lint/冒烟/测试）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: 敏感信息闸门（含历史）
+        run: |
+          chmod +x scripts/secret_scan.sh
+          scripts/secret_scan.sh --history
+      - name: Lint
+        run: ruff check src scripts
+      - name: 冒烟
+        run: |
+          python -c "import omni_gateway, omni_gateway.app, omni_gateway.scheduler, omni_gateway.upstream; print('import ok', omni_gateway.__version__)"
+          python -c "from omni_gateway.config import GatewayConfig; c=GatewayConfig.load('config/gateway.example.yaml'); assert c.models; print('config ok', sorted(c.models))"
+      - name: Tests
+        run: |
+          if ls tests/test_*.py >/dev/null 2>&1; then pytest -q; else echo "no tests"; fi
+
+  image-and-release:
+    name: 构建镜像并发布 Release
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 推导版本（tag 去掉 v 前缀）
+        id: ver
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "build=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: 构建镜像（build 参数 == tag）
+        run: |
+          docker build -f docker/Dockerfile \
+            --build-arg OMNI_BUILD="${{ steps.ver.outputs.build }}" \
+            -t "hai-omni-gateway:${{ steps.ver.outputs.build }}" .
+      - name: 断言镜像内 build 与 tag 一致
+        run: |
+          docker run --rm --entrypoint python "hai-omni-gateway:${{ steps.ver.outputs.build }}" \
+            -c "import os,sys; b=os.environ.get('OMNI_BUILD',''); print('image build =', b); sys.exit(0 if b=='${{ steps.ver.outputs.build }}' else 1)"
+      - name: 生成 Release 正文
+        run: |
+          python scripts/release_notes.py "${{ steps.ver.outputs.tag }}" > /tmp/notes.md
+          cat /tmp/notes.md
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          body_path: /tmp/notes.md
+          draft: false
+          prerelease: ${{ contains(steps.ver.outputs.tag, '-maint') || contains(steps.ver.outputs.tag, 'rc') || contains(steps.ver.outputs.tag, 'beta') }}
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

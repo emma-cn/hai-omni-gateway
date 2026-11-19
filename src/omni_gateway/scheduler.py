@@ -32,6 +32,16 @@ class WakeFailed(Exception):
     """唤醒失败（OOM / 健康检查超时）。API 层应转成 503 + Retry-After。"""
 
 
+class DrainTimeout(Exception):
+    """换台前 drain 没能在 drain_timeout_s 内清零。
+
+    上游（vllm-omni）的 sleep 语义是「暂停没完成 = 暂停失败，不许 sleep」，
+    所以这里**不能**硬换台，只能拒绝本次切换：API 层转 503 + Retry-After，
+    让客户端重试。硬换台的后果是在飞请求被掐掉、引擎状态与网关记账永久错位。
+    """
+
+
+
 class Card:
     def __init__(self, cfg: CardConfig, models: dict[str, ModelConfig], client: OmniClient) -> None:
         self.cfg = cfg
@@ -111,7 +121,10 @@ class Card:
                 log.debug("card %s: min_dwell 还差 %.1fs", self.cfg.name, wait)
                 await asyncio.sleep(wait)
 
-            # drain：等在途清零（超时后才放弃，绝不 abort 用户请求）
+            # drain：必须等在途清零。上游规则（vllm-omni sleep 的语义）是
+            # 「暂停没完成 = 暂停失败，不许 sleep」——超时不能硬换台，
+            # 否则会把用户请求连同引擎状态一起掐掉，且事后无法复原。
+            # 正确做法：拒绝本次切换，让客户端拿 503 + Retry-After 重试。
             deadline = time.monotonic() + self.cfg.drain_timeout_s
             while self._inflight.get(cur, 0) > 0 and time.monotonic() < deadline:
                 self._lock.release()
@@ -120,7 +133,12 @@ class Card:
                 finally:
                     await self._lock.acquire()
             if self._inflight.get(cur, 0) > 0:
-                log.warning("card %s: drain 超时，仍有 %d 条在飞，继续换台", self.cfg.name, self._inflight[cur])
+                n = self._inflight[cur]
+                self._event("fail", cur, f"drain 超时（{n} 条在飞），拒绝换台")
+                raise DrainTimeout(
+                    f"card {self.cfg.name}: {cur} 仍有 {n} 条在飞，"
+                    f"{self.cfg.drain_timeout_s:.0f}s 内未清零；按上游规则不得 sleep，拒绝换台"
+                )
             ok, err = await self.client.sleep(self.models[cur])
             if ok:
                 self._event("sleep", cur)

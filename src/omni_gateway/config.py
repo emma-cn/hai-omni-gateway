@@ -53,7 +53,7 @@ class GatewayConfig:
     queue_limit: int = 200         # 每个模型排队上限，超了直接 429
 
     @staticmethod
-    def load(path: str | Path) -> "GatewayConfig":
+    def load(path: str | Path) -> GatewayConfig:
         raw: dict[str, Any] = yaml.safe_load(Path(path).read_text()) or {}
         cards = {
             name: CardConfig(name=name, **{k: v for k, v in (body or {}).items() if k != "name"})

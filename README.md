@@ -1,5 +1,7 @@
 # hai-omni-gateway
 
+> **唯一真源**：<https://github.com/emma-cn/hai-omni-gateway>。别处的副本不作数。
+
 vllm-omni **多模态**（音频 / 图像 / 视频）服务的统一入口网关。
 
 对外提供**标准 OpenAI 兼容接口**（`/v1/audio/speech`、`/v1/audio/transcriptions`、
@@ -37,7 +39,7 @@ llama-swap 的模型生命周期是「**cmd 进程的生死 = 模型是否在显
 
 结论：编排层自己写，但接口和语义沿用它的（队列 / 503 / 加载反馈 / TTL）。
 
-## 实测数据（2026-11-19，13.1 单张 RTX 4090 24GB）
+## 实测数据（2026-11-19，单张 RTX 4090 24GB 开发机）
 
 | 项 | 数值 |
 |---|---|

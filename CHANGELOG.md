@@ -1,0 +1,42 @@
+# Changelog
+
+格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
+版本号 = `0.1.<build>`，**构建号连续累加、永不回退**（同 [magpie](https://github.com/yetone/magpie) 的做法）。
+
+每条发布必须写清三件事：改了什么 / **跑了什么**（命令与结论）/ 已知问题。
+
+## [Unreleased]
+
+### 计划中（P0，开放产品上线前置）
+- 鉴权与多租户：分级鉴权（loopback 免 key、非 loopback 强制）、`Authorization: Bearer` 与
+  `x-api-key` 双写法、key 带能力/模型/额度、运维面独立 admin token
+- 队列与背压：有界 FIFO + 准入预判（超限 429 `queue_full` + 指向"何时有位"的 `Retry-After`），
+  `request_timeout_s` 真中断
+- 熔断与自愈：连续唤醒失败熔断、区分"显存不足 / 进程死 / 上游拒参数"、后端进程重启钩子
+- 开放契约：错误体 `{message,type,param,code}`（`code` 为机器码）、全响应限流头、404 自描述、
+  `/v1/models` 变能力目录
+- 长任务租约：job 表 + `lease_s` 记账、`Idempotency-Key` 去重
+- 请求账本：每请求一行 JSONL，**排队/唤醒/生成三段耗时分开记**
+
+## [0.1.0] - 2026-11-20
+
+### Added
+- OpenAI 兼容入口：`/v1/audio/speech`、`/v1/audio/transcriptions`、`/v1/audio/voices`、
+  `/v1/images/*`、`/v1/videos*`；按 endpoint 的能力匹配模型 `capabilities`
+- 卡级单写者调度：一张卡同时只醒一个模型，`min_dwell_s` / `drain_timeout_s` / `ttl_s` / `concurrency`
+- 两段式唤醒 `wakeup + resume + 健康检查`（缺 `resume` 会让请求永久挂在准入等待）
+- 管理页 `/ui` 与 `/admin/{state,wake,sleep}`
+- 启动对账：把所有后端睡一遍再归零，避免"以为都睡着、实际有模型醒着"导致唤醒 OOM
+- 调度正确性：drain 未在 `drain_timeout_s` 内清零时**拒绝换台**，返回 503 `drain_timeout` + `Retry-After`
+  （上游规则：暂停未完成不许 sleep；旧实现打完 warning 继续换台，会掐掉在飞请求）
+- 工程治理：`AGENTS.md` / `LESSONS.md` / `SECURITY.md` / PR 与 issue 模板
+- 敏感信息闸门 `scripts/secret_scan.sh`：内网 IP、内网域名、密钥前缀、绝对路径命中即红，支持 `--history`
+- CI 三段：闸门 → lint+冒烟（py3.11/3.12）→ 镜像构建
+- 发版机制：`v0.1.<build>` 连续累加、tag 上重跑全量验证、镜像 tag == `/healthz` 的 `build` 字段、
+  Release 正文取自本 CHANGELOG（`scripts/release.sh` / `release.yml` / `RELEASING.md`）
+
+### Known issues
+- 无鉴权：`/v1/*`、`/admin/*`、`/ui` 均无凭据可访问
+- `queue_limit`、`request_timeout_s` 声明但未生效；`lease_s` 仅展示、无记账
+- `GET /v1/audio/voices` 未透传（上游直连 200，网关 405）
+- `X-Omni-Wake-ETA` 在 README 承诺、代码未实现
