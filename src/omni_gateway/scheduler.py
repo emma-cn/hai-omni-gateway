@@ -91,6 +91,8 @@ class Card:
         self._cond: dict[str, asyncio.Condition] = {n: asyncio.Condition() for n in models}
         self._waiting: dict[str, deque[int]] = {n: deque() for n in models}
         self._seq = 0
+        self._last_idle_fail = 0.0
+        self._idle_fail_backoff_s = 30.0
         # 事件环：给管理页展示"谁什么时候被唤醒/睡下/失败"
         self.events: deque[dict[str, Any]] = deque(maxlen=200)
 
@@ -267,13 +269,23 @@ class Card:
                 return
             if time.monotonic() - self._last_switch < m.ttl_s:
                 return
+            # 退避：上一次空闲睡失败过就先别急着重试。
+            # 实测教训：不加退避时每 5s 重试一次，把后端打成 ReadError 风暴，
+            # 日志刷屏且掩盖真实原因（当时真因是容器没开 --enable-sleep-mode）。
+            if time.monotonic() - getattr(self, "_last_idle_fail", 0.0) < self._idle_fail_backoff_s:
+                return
             log.info("card %s: %s 空闲超过 %.0fs，睡下", self.cfg.name, cur, m.ttl_s)
             ok, err = await self.client.sleep(m)
             if ok:
                 self._awake = None
+                self._last_idle_fail = 0.0
                 self._event("idle_sleep", cur, f"ttl={m.ttl_s:.0f}s")
             else:
-                log.warning("card %s: 空闲睡 %s 失败：%s", self.cfg.name, cur, err)
+                self._last_idle_fail = time.monotonic()
+                log.warning(
+                    "card %s: 空闲睡 %s 失败（%.0fs 内不再重试）：%s",
+                    self.cfg.name, cur, self._idle_fail_backoff_s, err,
+                )
                 self._event("fail", cur, f"idle_sleep: {err}")
 
     # ------------------------------------------------------- 管理页手动操作

@@ -302,8 +302,18 @@ def create_app(config_path: str) -> FastAPI:
             return JSONResponse({"detail": f"未知模型 {model}"}, status_code=404)
         try:
             await sched.card_of(model).force_wake(model)
-        except WakeFailed as e:
-            return JSONResponse({"detail": f"唤醒失败: {e}"}, status_code=503)
+        except (WakeFailed, SleepFailed, DrainTimeout, QueueFull, RequestTimeout) as e:
+            # 换台失败一律 503 + Retry-After：对客户端而言"现在切不过去，晚点再来"，
+            # 未捕获会变成 500，而 500 会被客户端当成"网关有 bug，不该重试"。
+            # detail 保持人话（客户端日志里要能直接读懂），code 给机器判断用。
+            # WakeFailed 用"唤醒失败"措辞保持向后兼容（已有用例与客户端按这个词匹配）。
+            kind = type(e).__name__.lower()
+            prefix = "唤醒失败" if isinstance(e, WakeFailed) else "换台失败"
+            return JSONResponse(
+                {"detail": f"{prefix}({kind}): {e}", "code": kind},
+                status_code=503,
+                headers={"Retry-After": "5"},
+            )
         return JSONResponse({"ok": True, "model": model, "status": "awake"})
 
     @app.post("/admin/sleep")

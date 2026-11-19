@@ -16,6 +16,21 @@
 - 长任务租约：job 表 + `lease_s` 记账、`Idempotency-Key` 去重
 - 请求账本：每请求一行 JSONL，**排队/唤醒/生成三段耗时分开记**
 
+## [0.1.2] - 2026-11-20
+
+### Fixed
+- `/admin/wake`、`/admin/sleep`、`/admin/reconcile` 在换台失败时抛 `SleepFailed` /
+  `DrainTimeout` / `QueueFull` / `RequestTimeout` 会变成 **500**（未捕获）——
+  500 意味着"网关有 bug、别重试"，与真实语义（稍后重试即可）相反。现统一 503 + `Retry-After`
+- 空闲回收失败后每 5s 重试一次，把后端打成 `ReadError` 风暴、日志刷屏并掩盖真因；
+  现在失败后 30s 内不再重试
+
+### 实测（配合后端仓 B4）
+- 后端 `--enable-sleep-mode` 缺失时，`/v1/omni/sleep` 回 200 + `freed_bytes=0` 但**显存不释放**，
+  网关会误以为换台成功（实测 20 轮"换台"显存恒为 20.3 GiB）。补齐 flag 后同一条 sleep
+  由 4ms 变 2.8s、显存 20905 → 12159 MiB
+- swap 共存档 20 轮轮流醒：wake 全 200、零 OOM、容器重启计数 0→0
+
 ## [0.1.1] - 2026-11-20
 
 ### Added
