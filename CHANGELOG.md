@@ -10,13 +10,34 @@
 ### 计划中（P0，开放产品上线前置）
 - 鉴权与多租户：分级鉴权（loopback 免 key、非 loopback 强制）、`Authorization: Bearer` 与
   `x-api-key` 双写法、key 带能力/模型/额度、运维面独立 admin token
-- 队列与背压：有界 FIFO + 准入预判（超限 429 `queue_full` + 指向"何时有位"的 `Retry-After`），
-  `request_timeout_s` 真中断
 - 熔断与自愈：连续唤醒失败熔断、区分"显存不足 / 进程死 / 上游拒参数"、后端进程重启钩子
 - 开放契约：错误体 `{message,type,param,code}`（`code` 为机器码）、全响应限流头、404 自描述、
   `/v1/models` 变能力目录
 - 长任务租约：job 表 + `lease_s` 记账、`Idempotency-Key` 去重
 - 请求账本：每请求一行 JSONL，**排队/唤醒/生成三段耗时分开记**
+
+## [0.1.1] - 2026-11-20
+
+### Added
+- **有界 FIFO 队列（P0-2 / A-201~A-203）**：`Card.acquire()` 不再 20ms 忙等轮询，改为
+  `asyncio.Condition` + 每模型 ticket 队列，先到先得（防长任务饿死）
+- 队列满 → `429 queue_full` + `Retry-After: 2`；排队超过 `request_timeout_s` →
+  `503 request_timeout` + `Retry-After: 5`（此前都是无限等，真实超时只有全局 read=1800s）
+- `request_timeout_s` 现在也作用到**在飞请求**（httpx 逐请求超时，connect 固定 5s）
+
+### Changed
+- `queue_limit` 语义写进示例配置：**允许排队（等待）的请求数上限**，`0` = 不排队；
+  进系统总量 = 模型 `concurrency` + `queue_limit`（与验收 A-203 的 4+16=20 口径一致）
+- `acquire()` 返回排队等待毫秒数，为 P0-6 账本的 `queue_wait_ms` 备好埋点
+
+### Fixed
+- 取消/异常路径不再泄漏在飞名额（原先排队请求被取消后名额不减，最终把该模型堵死）
+
+### 实测
+- `ruff check src scripts`：All checks passed
+- `pytest`：88 passed, 4 xfailed（新增 `test_queue_full_raises_when_limit_reached`、
+  `test_queue_wait_times_out`、`test_queue_is_fifo`；两条 429 验收用例去掉 xfail 后真绿）
+- 未在真后端压测 32 并发（需实卡，留给产品侧 `accept.sh --heavy` 复核）
 
 ## [0.1.0] - 2026-11-20
 

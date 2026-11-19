@@ -6,6 +6,10 @@
 # 卡（card）是调度单位：同一张卡上同一时刻只允许一个模型醒着。
 
 listen: 0.0.0.0:8080
+
+# 每个模型「允许排队等待」的请求数上限：达到上限后新请求立刻 429 queue_full + Retry-After。
+# 0 = 不排队（超过 concurrency 立即 429）。
+# 进系统的总量 = 模型 concurrency + queue_limit（例：4 + 16 = 同模型最多 20 个请求在系统内）。
 queue_limit: 200
 
 cards:

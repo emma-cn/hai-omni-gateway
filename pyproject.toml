@@ -1,6 +1,6 @@
 [project]
 name = "hai-omni-gateway"
-version = "0.1.0"
+version = "0.1.1"
 description = "vllm-omni 音频栈的统一入口网关：OpenAI 兼容接口 + 卡级调度 + 请求队列"
 requires-python = ">=3.11"
 dependencies = [

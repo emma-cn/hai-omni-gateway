@@ -104,12 +104,13 @@ async def test_acceptance_one_wake_serves_the_whole_queue(gw):
 # ------------------------------------------------- 背压：队列上限（DESIGN §4）
 
 
-@pytest.mark.xfail(strict=True, reason="未实现：queue_limit 入库但从没被校验，超限只会无限排队、永不 429（见报告 A1）")
 async def test_acceptance_queue_limit_returns_429(gw):
     """queue_limit 超了必须 429 + Retry-After，而不是让客户端无限等。"""
     raw = base_cfg()
     raw["models"][A]["concurrency"] = 1
-    raw["queue_limit"] = 1
+    # queue_limit 的语义：**允许排队（等待中）的请求数上限**；0 = 不排队，满了直接 429。
+    # 产品验收 A-203 的算术也是这个口径：concurrency=4 + queue_limit=16 → 20 个进系统、其余 429。
+    raw["queue_limit"] = 0
     async with gw(raw) as g:
         g.backend.delays["speech"] = 0.6
         first = asyncio.create_task(g.client.post("/v1/audio/speech", json=speech_body(A)))
@@ -124,7 +125,6 @@ async def test_acceptance_queue_limit_returns_429(gw):
             await first
 
 
-@pytest.mark.xfail(strict=True, reason="未实现：P0-2 队列与背压 / 验收 A-201~A-203 —— 超过 queue_limit 应 429 而非无限等")
 async def test_acceptance_queue_over_limit_returns_429(gw):
     """目标契约：队列满时必须 429（而不是让客户端无限等）。
 
@@ -133,7 +133,7 @@ async def test_acceptance_queue_over_limit_returns_429(gw):
     """
     raw = base_cfg()
     raw["models"][A]["concurrency"] = 1
-    raw["queue_limit"] = 1
+    raw["queue_limit"] = 0     # 见上一条用例的语义说明
     async with gw(raw) as g:
         g.backend.delays["speech"] = 0.3
         first = asyncio.create_task(g.client.post("/v1/audio/speech", json=speech_body(A)))

@@ -11,7 +11,7 @@ import time
 import pytest
 
 from conftest import base_cfg, multi_cfg
-from omni_gateway.scheduler import DrainTimeout, SleepFailed, WakeFailed
+from omni_gateway.scheduler import DrainTimeout, QueueFull, RequestTimeout, SleepFailed, WakeFailed
 
 pytestmark = pytest.mark.asyncio
 
@@ -129,6 +129,64 @@ async def test_sleep_failure_aborts_switch(gw):
         assert card.awake_model == A, "睡失败后仍把状态改成了 B"
         assert g.backend.count("wakeup") == wakes_before, "睡失败后仍去唤醒新模型（必 OOM）"
         await card.release(A)
+
+
+async def test_queue_full_raises_when_limit_reached(gw):
+    """排队人数超过 queue_limit → QueueFull（API 层 429），而不是继续排。"""
+    raw = base_cfg()
+    raw["queue_limit"] = 1
+    raw["models"][A]["concurrency"] = 1
+    async with gw(raw) as g:
+        card = g.sched.card_of(A)
+        g.backend.delays["speech"] = 0.5
+        await card.acquire(A)                       # 占住唯一执行名额
+        waiter = asyncio.create_task(card.acquire(A))   # 排第 1 个：允许
+        await asyncio.sleep(0.05)
+        with pytest.raises(QueueFull):              # 第 2 个：超限直接拒
+            await card.acquire(A)
+        await card.release(A)
+        await asyncio.wait_for(waiter, timeout=2)
+        await card.release(A)
+
+
+async def test_queue_wait_times_out(gw):
+    """排队超过 request_timeout_s → RequestTimeout（不是永远挂着）。"""
+    raw = base_cfg()
+    raw["queue_limit"] = 10
+    raw["models"][A]["concurrency"] = 1
+    raw["models"][A]["request_timeout_s"] = 0.2
+    async with gw(raw) as g:
+        card = g.sched.card_of(A)
+        await card.acquire(A)
+        t0 = time.monotonic()
+        with pytest.raises(RequestTimeout):
+            await asyncio.wait_for(card.acquire(A), timeout=3)
+        assert time.monotonic() - t0 < 2.5, "排队超时没有按 request_timeout_s 生效"
+        await card.release(A)
+
+
+async def test_queue_is_fifo(gw):
+    """先到先得：后到的不能插队（否则长任务永远饿死）。"""
+    raw = base_cfg()
+    raw["queue_limit"] = 10
+    raw["models"][A]["concurrency"] = 1
+    raw["models"][A]["request_timeout_s"] = 5
+    async with gw(raw) as g:
+        card = g.sched.card_of(A)
+        await card.acquire(A)
+        order: list[int] = []
+
+        async def queued(i: int) -> None:
+            await card.acquire(A)
+            order.append(i)
+            await asyncio.sleep(0.01)
+            await card.release(A)
+
+        tasks = [asyncio.create_task(queued(i)) for i in range(3)]
+        await asyncio.sleep(0.1)
+        await card.release(A)
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+        assert order == [0, 1, 2], f"队列不是 FIFO：实际完成顺序 {order}"
 
 
 async def test_wakeup_failure_raises_and_clears_state(gw):

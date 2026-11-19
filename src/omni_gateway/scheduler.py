@@ -50,8 +50,30 @@ class DrainTimeout(Exception):
 
 
 
+class QueueFull(Exception):
+    """排队人数超过 queue_limit。API 层转 429 + Retry-After。
+
+    语义选择：宁可快速失败让客户端退避，也不要让它无限期挂着——
+    无限排队会把"服务慢"伪装成"服务正常"，客户端 p99 直接失去意义。
+    """
+
+
+class RequestTimeout(Exception):
+    """在队列里等到 request_timeout_s 仍没拿到执行名额。
+
+    注意这**不是** 504 Gateway Timeout：请求根本没发到上游，是排队超时。
+    API 层转 503 + Retry-After，并可被客户端安全重试（幂等键另算）。
+    """
+
+
 class Card:
-    def __init__(self, cfg: CardConfig, models: dict[str, ModelConfig], client: OmniClient) -> None:
+    def __init__(
+        self,
+        cfg: CardConfig,
+        models: dict[str, ModelConfig],
+        client: OmniClient,
+        queue_limit: int = 200,
+    ) -> None:
         self.cfg = cfg
         self.models = models
         self.client = client
@@ -61,6 +83,14 @@ class Card:
         self._last_switch = 0.0
         self._drained = asyncio.Event()
         self._drained.set()
+        # ---- 有界 FIFO 队列（P0-2）----
+        # 为什么不用 asyncio.Semaphore：信号量不保证公平（后到可能先拿），
+        # 也不给"当前排了多少人"这个东西，queue_limit 就没法判。
+        # 所以自己记顺序：每个模型一条 ticket 队列，队首才有资格拿名额。
+        self._queue_limit = max(0, int(queue_limit))
+        self._cond: dict[str, asyncio.Condition] = {n: asyncio.Condition() for n in models}
+        self._waiting: dict[str, deque[int]] = {n: deque() for n in models}
+        self._seq = 0
         # 事件环：给管理页展示"谁什么时候被唤醒/睡下/失败"
         self.events: deque[dict[str, Any]] = deque(maxlen=200)
 
@@ -96,29 +126,87 @@ class Card:
         return self._inflight.get(model, 0)
 
     # ---------------------------------------------------------------- 核心
-    async def acquire(self, model: str) -> None:
-        """确保 model 醒着，并占一个在飞名额。失败抛 WakeFailed。"""
-        m = self.models[model]
-        async with self._lock:
-            # 并发上限（对齐 vllm 的 max_num_seqs）
-            if self._inflight[model] >= m.concurrency:
-                while self._inflight[model] >= m.concurrency and self._awake == model:
-                    self._lock.release()
-                    try:
-                        await asyncio.sleep(0.02)
-                    finally:
-                        await self._lock.acquire()
+    async def acquire(self, model: str) -> float:
+        """确保 model 醒着并占一个在飞名额，返回排队等待毫秒数。
 
-            if self._awake != model:
-                await self._switch_to(model)
-            self._inflight[model] += 1
-            self._drained.clear()
+        失败语义（都由 API 层翻译成 HTTP）：
+          QueueFull      → 429 queue_full（队列已满，别排队了，退避重试）
+          RequestTimeout → 503 request_timeout（排太久，没轮到你）
+          WakeFailed / SleepFailed / DrainTimeout → 503（见各自 docstring）
+
+        全程事件驱动（Condition.wait），没有任何 sleep 轮询：
+        忙等在 concurrency 打满时会让每个等待请求每秒空转 50 次，几百个请求就能把
+        CPU 吃满，而且取消时还会漏掉唤醒。
+        """
+        m = self.models[model]
+        cond = self._cond[model]
+        t0 = time.monotonic()
+        deadline = t0 + m.request_timeout_s
+        self._seq += 1
+        ticket = self._seq
+
+        async with cond:
+            self._waiting[model].append(ticket)
+            try:
+                while True:
+                    at_head = bool(self._waiting[model]) and self._waiting[model][0] == ticket
+                    if at_head and self._inflight[model] < m.concurrency:
+                        self._waiting[model].popleft()
+                        self._inflight[model] += 1
+                        self._drained.clear()
+                        break
+                    # 队列上限：排在自己前面的（不含自己）已经到顶就别再排了
+                    if len(self._waiting[model]) - 1 >= self._queue_limit:
+                        self._waiting[model].remove(ticket)
+                        cond.notify_all()
+                        raise QueueFull(
+                            f"{model}: 队列已满（queue_limit={self._queue_limit}，"
+                            f"在飞 {self._inflight[model]}/{m.concurrency}）"
+                        )
+                    remain = deadline - time.monotonic()
+                    if remain <= 0:
+                        self._waiting[model].remove(ticket)
+                        cond.notify_all()
+                        raise RequestTimeout(
+                            f"{model}: 排队 {m.request_timeout_s:.0f}s 仍未获得执行名额"
+                        )
+                    try:
+                        await asyncio.wait_for(cond.wait(), timeout=remain)
+                    except TimeoutError:
+                        self._waiting[model].remove(ticket)
+                        cond.notify_all()
+                        raise RequestTimeout(
+                            f"{model}: 排队 {m.request_timeout_s:.0f}s 仍未获得执行名额"
+                        ) from None
+            except BaseException:
+                # 任何异常都要把名额还回去/唤醒后面的人（取消也一样）
+                cond.notify_all()
+                raise
+
+        # 名额已占住，再确保模型醒着；醒不过来必须把名额退回，否则会永久泄漏
+        try:
+            async with self._lock:
+                if self._awake != model:
+                    await self._switch_to(model)
+        except BaseException:
+            await self._release_slot(model)
+            raise
+        return (time.monotonic() - t0) * 1000.0
+
+    async def _release_slot(self, model: str) -> None:
+        cond = self._cond[model]
+        async with cond:
+            self._inflight[model] = max(0, self._inflight.get(model, 0) - 1)
+            if (
+                self._inflight[model] == 0
+                and self._awake is not None
+                and self._inflight.get(self._awake, 0) == 0
+            ):
+                self._drained.set()
+            cond.notify_all()
 
     async def release(self, model: str) -> None:
-        async with self._lock:
-            self._inflight[model] = max(0, self._inflight.get(model, 0) - 1)
-            if self._inflight[model] == 0 and self._awake is not None and self._inflight.get(self._awake, 0) == 0:
-                self._drained.set()
+        await self._release_slot(model)
 
     async def _switch_to(self, target: str) -> None:
         cur = self._awake
@@ -229,7 +317,7 @@ class Scheduler:
         self.cards: dict[str, Card] = {}
         for card_name, card_cfg in cfg.cards.items():
             models = {n: m for n, m in cfg.models.items() if m.card == card_name}
-            self.cards[card_name] = Card(card_cfg, models, client)
+            self.cards[card_name] = Card(card_cfg, models, client, queue_limit=cfg.queue_limit)
         self._task: asyncio.Task | None = None
 
     def card_of(self, model: str) -> Card:

@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 
 from . import __version__
 from .config import GatewayConfig
-from .scheduler import DrainTimeout, Scheduler, SleepFailed, WakeFailed
+from .scheduler import DrainTimeout, QueueFull, RequestTimeout, Scheduler, SleepFailed, WakeFailed
 from .upstream import OmniClient
 
 log = logging.getLogger(__name__)
@@ -144,6 +144,14 @@ def create_app(config_path: str) -> FastAPI:
         except WakeFailed as e:
             log.warning("唤醒 %s 失败: %s", model, e)
             return _error(503, f"模型 {model} 唤醒失败，请稍后重试", "wake_failed", retry_after=10)
+        except QueueFull as e:
+            # 队列满：快速失败 + 告诉客户端多久再来，比让它无限等更有用
+            log.warning("队列已满，拒绝排队: %s", e)
+            return _error(429, str(e), "queue_full", retry_after=2)
+        except RequestTimeout as e:
+            # 排队超时：请求根本没发到上游，客户端可安全重试
+            log.warning("排队超时: %s", e)
+            return _error(503, str(e), "request_timeout", retry_after=5)
         except SleepFailed as e:
             # 旧模型睡不下去时绝不能继续唤醒：硬换必 OOM，OOM 会打死后端进程。
             log.error("睡眠失败，已中止换台: %s", e)
@@ -165,8 +173,14 @@ def create_app(config_path: str) -> FastAPI:
         try:
             body = await request.body()
             headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP}
+            # 单请求超时用模型自己的 request_timeout_s：
+            # 全局 read=1800s 是"永不超时"的另一种说法，长任务也会因此挂到客户端先断。
+            # 连接超时单独给 5s —— 连不上应当快速报错，而不是占着名额干等。
+            req_timeout = httpx.Timeout(m.request_timeout_s, connect=5.0)
             upstream = await client.send(
-                client.build_request(request.method, m.base_url + path, content=body, headers=headers),
+                client.build_request(
+                    request.method, m.base_url + path, content=body, headers=headers, timeout=req_timeout
+                ),
                 stream=True,
             )
             resp_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in HOP_BY_HOP}
