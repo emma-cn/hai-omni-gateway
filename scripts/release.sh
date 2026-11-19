@@ -50,8 +50,8 @@ git tag -a "$NEXT" -m "$NEXT"
 git push origin "$NEXT" || { git tag -d "$NEXT"; echo "推送失败，已删除本地 tag"; exit 1; }
 
 echo
-echo "已推送 $NEXT。跟踪进度："
+echo "已推送 ${NEXT}。跟踪进度："
 echo "  https://github.com/$REPO/actions/workflows/release.yml"
 echo "回滚（发布包有问题时）："
-echo "  git push origin :refs/tags/$NEXT        # 删远端 tag（版本号作废，不复用）"
-echo "  gh release delete $NEXT --yes           # 删 Release"
+echo "  git push origin :refs/tags/${NEXT}      # 删远端 tag（版本号作废，不复用）"
+echo "  gh release delete ${NEXT} --yes         # 删 Release"
