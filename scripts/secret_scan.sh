@@ -74,9 +74,15 @@ run_grep '绝对路径' '(^|[[:space:]"'"'"'(=:])(/home/[a-z][A-Za-z0-9._-]*/|/U
 
 if [ "$HISTORY" = 1 ]; then
   echo "[信息] 扫 git 历史（转 public 前必须跑一次）"
-  hist="$(git log -p --all 2>/dev/null | grep -InE '([0-9]{1,3}\.){3}[0-9]{1,3}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|imar\.xin|migudm\.cn|/home/[a-z][A-Za-z0-9._-]*/|/Users/[A-Za-z][A-Za-z0-9._-]*/' || true)"
+  # 历史扫描用**更窄的口径**：只认"真实使用形态"——带协议的 URL、密钥、绝对路径、IP。
+  # 为什么不沿用工作树口径：提交信息里为了说明规则，会写到域名/网段的字面量（"把 X 域名
+  # 换成 Y"），这类散文提及不是泄露，若一律拦截会逼人下次不敢写复盘，反而更危险。
+  hist="$(
+    git log -p --all 2>/dev/null | grep -InE \
+      '(https?|wss?)://[A-Za-z0-9._-]*(imar\.xin|migudm\.cn)|([0-9]{1,3}\.){3}[0-9]{1,3}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|/home/[a-z][A-Za-z0-9._-]*/|/Users/[A-Za-z][A-Za-z0-9._-]*/' \
+      || true
+  )"
   if [ -n "$hist" ]; then
-    # 历史里白名单 IP 不报
     hist="$(printf '%s\n' "$hist" | grep -vE '(127\.0\.0\.1|0\.0\.0\.0|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)' || true)"
   fi
   if [ -n "$hist" ]; then
