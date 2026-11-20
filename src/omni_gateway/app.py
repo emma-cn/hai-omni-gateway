@@ -32,9 +32,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__, catalog
-from .ledger import Ledger, summarize
 from .auth import Authenticator, AuthError
 from .config import GatewayConfig
+from .ledger import Ledger, summarize
 from .scheduler import (
     BackendUnavailable,
     BadRequestRejected,
