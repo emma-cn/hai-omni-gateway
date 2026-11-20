@@ -159,8 +159,12 @@ async def test_key_cannot_use_model_outside_its_scope(gw):
         assert r.json()["error"]["code"] == "forbidden"
 
 
-async def test_rpm_limit_returns_429(gw):
-    """按 key 的速率上限：超了给 429 rate_limited，而不是继续放行。"""
+async def test_rpm_limit_returns_429_with_openai_code(gw):
+    """按 key 的速率上限：429 且 code 必须是 OpenAI 的 `rate_limit_exceeded`。
+
+    兼容层按 `code` 做退避/降级，自造词（早期是 `rate_limited`）会逼客户端写特例。
+    我们自己的细分原因放在 `reason` 字段里。
+    """
     raw = external_cfg(keys=[{"name": "slow", "key": "sk-slow", "rpm": 2}])
     raw["listen"] = "0.0.0.0:8080"
     async with gw(raw, client_host=EXTERNAL_HOST) as g:
@@ -168,6 +172,10 @@ async def test_rpm_limit_returns_429(gw):
         codes = [(await g.client.get("/v1/models", headers=h)).status_code for _ in range(3)]
         assert codes[:2] == [200, 200]
         assert codes[2] == 429
+        r = await g.client.get("/v1/models", headers=h)
+        err = r.json()["error"]
+        assert err["code"] == "rate_limit_exceeded", "429 的 code 必须对齐 OpenAI"
+        assert err.get("reason") == "rpm"
 
 
 async def test_missing_model_is_400_not_guessed(gw):

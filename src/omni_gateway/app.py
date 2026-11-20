@@ -217,11 +217,10 @@ def create_app(config_path: str) -> FastAPI:
                     headers["x-ratelimit-limit-requests"] = str(limit)
                     headers["x-ratelimit-remaining-requests"] = str(remaining)
                     headers["x-ratelimit-reset-requests"] = str(reset)
-            return JSONResponse(
-                {"error": {"message": e.message, "type": e.code, "code": e.code}},
-                status_code=e.status,
-                headers=headers,
-            )
+            body: dict[str, Any] = {"message": e.message, "type": e.code, "code": e.code}
+            if getattr(e, "reason", ""):
+                body["reason"] = e.reason
+            return JSONResponse({"error": body}, status_code=e.status, headers=headers)
         request.state.identity = ident
         response = await call_next(request)
         # 请求 ID 永远带；限流头**只在真的有限额时才发**。
@@ -303,7 +302,9 @@ def create_app(config_path: str) -> FastAPI:
         except QueueFull as e:
             # 队列满：快速失败 + 告诉客户端多久再来，比让它无限等更有用
             log.warning("队列已满，拒绝排队: %s", e)
-            return _error(429, str(e), "queue_full", retry_after=2)
+            # 429 的 code 统一用 OpenAI 的 rate_limit_exceeded（客户端按 code 分支），
+            # 我们自己的"队列满"细分放进 reason 字段。
+            return _error(429, str(e), "rate_limit_exceeded", retry_after=2, reason="queue_full")
         except RequestTimeout as e:
             # 排队超时：请求根本没发到上游，客户端可安全重试
             log.warning("排队超时: %s", e)

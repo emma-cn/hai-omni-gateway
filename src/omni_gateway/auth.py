@@ -44,11 +44,14 @@ class AuthError(Exception):
         code: str,
         message: str,
         rate: tuple[int, int, int] | None = None,
+        reason: str = "",
     ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        # 细分原因（如 rpm / queue_full），作为额外字段返回，不进 code
+        self.reason = reason
         # (limit, remaining, reset) —— 429 时带上，否则客户端不知道何时能重试
         self.rate = rate
 
@@ -192,11 +195,15 @@ class Authenticator:
         bucket = self._buckets.setdefault(key.name, _Bucket())
         now = self._now()
         if not bucket.allow(key.rpm, now):
+            # code 对齐 OpenAI 官方（`rate_limit_exceeded`）：按 code 做退避/降级的
+            # 兼容层认的就是这个字面量，自造词会逼客户端写特例。
+            # 我们自己的细分原因放 `reason`，不丢信息也不破坏兼容。
             raise AuthError(
                 429,
-                "rate_limited",
+                "rate_limit_exceeded",
                 f"超出该 key 的速率上限（{key.rpm} rpm）",
                 rate=(key.rpm, 0, bucket.retry_after(now)),
+                reason="rpm",
             )
         return Identity(name=key.name, key=key)
 

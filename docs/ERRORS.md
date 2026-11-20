@@ -13,7 +13,7 @@
 | `wake_failed` | 503 | 其他唤醒失败（未分类） | 按 `Retry-After` 重试 |
 | `sleep_failed` | 503 | 旧模型睡不下去，已中止换台 | 按 `Retry-After` 重试（此时**不会**硬换台） |
 | `drain_timeout` | 503 | 换台前在飞请求没能在超时内清零，已拒绝换台 | 按 `Retry-After` 重试 |
-| `queue_full` | 429 | 排队人数达到 `queue_limit` | 退避；不要继续排队 |
+| `rate_limit_exceeded` | 429 | 触发限流：`reason=rpm`（该 key 超 `rpm`）或 `reason=queue_full`（排队达 `queue_limit`） | 按 `Retry-After` 退避；**`code` 与 OpenAI 官方同名** |
 | `request_timeout` | 503 | 排队超过 `request_timeout_s` 仍没拿到执行名额 | 可安全重试（请求根本没发到上游） |
 | `upstream_error` | 502 | 转发给上游时出现未预期的传输错误 | 按 5xx 处理 |
 | `model_not_found` | 404 | `model` 不在配置里 | 不要重试；检查 `model` 字段 |
@@ -22,7 +22,21 @@
 | `not_found` | 404 | 没有这个端点（响应体会一并列出端点族，供客户端自解） | 检查路径或版本 |
 | `unauthorized` | 401 | 缺 key / key 无效或过期 / 运维面缺 admin token | 补正确凭据；**不要重试** |
 | `forbidden` | 403 | key 有效，但该 key 不被允许用这个模型或能力 | 换模型/能力，或申请授权 |
-| `rate_limited` | 429 | 超出该 key 的 `rpm` | 按 `Retry-After` 退避 |
+
+### 与 OpenAI 官方码的对齐约定
+
+**客户端会程序化处理的码，一律对齐官方字面量**，因为兼容层按 `code` 分支，自造词会逼人写特例：
+
+| 场景 | 我们的 `code` | OpenAI 官方 | 关系 |
+|---|---|---|---|
+| 429 限流 | `rate_limit_exceeded` | `rate_limit_exceeded` | ✅ 完全一致（细分原因在 `reason`） |
+| 404 模型不存在 | `model_not_found` | `model_not_found` | ✅ 一致 |
+| 401 未授权 | `unauthorized` | `invalid_api_key` | ⚠️ **有意偏离**：我们故意不区分"没给 key"与"key 错/过期"（区分只会帮攻击者探测），`invalid_api_key` 暗示"给了但无效"，不适合 |
+| 400 缺 model | `missing_model` | `invalid_request_error` | ⚠️ 有意偏离：官方码太笼统，客户端无法据此自动补齐字段 |
+| 参数不合法 | `capability_unsupported` / `bad_request` | `invalid_request_error` | ⚠️ 有意偏离，理由同上 |
+
+上表标 ⚠️ 的三项是**有意偏离**，不是遗漏；判断依据是"该码是否会被客户端程序化分支"——
+会分支的对齐，只用于人读的用更精确的自造码。
 
 响应体形状（除二进制音频流本身）：
 

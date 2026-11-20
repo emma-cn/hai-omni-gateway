@@ -25,6 +25,18 @@
   GitHub 上的 `v0.1.2`（bump 提交）内容不同却同号，即"同号不同内容"。
 - 已发布各号的内容：`v0.1.0 = 6f4131c7`、`v0.1.1 = a8bad3f5`、`v0.1.2 = d534ebca`、`v0.1.3 = 07a03783`。
 
+## [0.1.11] - 2026-11-20
+
+### Changed
+- **429 的 `code` 对齐 OpenAI 官方 `rate_limit_exceeded`**（原为自造的 `rate_limited`）。
+  兼容层按 `code` 做退避/降级，自造词会逼客户端写特例。
+  我们自己的细分原因放到独立字段 `reason`：`rpm`（该 key 超 `rpm`）或 `queue_full`（排队达上限）。
+- `docs/ERRORS.md` 新增《与 OpenAI 官方码的对齐约定》表：会程序化分支的码对齐官方；
+  标出三处**有意偏离**（`unauthorized` / `missing_model` / `capability_unsupported`）及理由。
+
+### 实测
+- pytest：108 passed, 4 xfailed（用例断言 429 的 `code == "rate_limit_exceeded"` 且 `reason == "rpm"`）
+
 ## [0.1.10] - 2026-11-20
 
 ### Added
