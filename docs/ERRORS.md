@@ -20,7 +20,7 @@
 | `capability_unsupported` | 400 | 该模型没有声明这个接口需要的能力 | 不要重试；换个模型或换接口 |
 | `missing_model` | 400 | 请求里没有 `model` | 补上 `model`（开放产品**不猜**候选） |
 | `not_found` | 404 | 没有这个端点（响应体会一并列出端点族，供客户端自解） | 检查路径或版本 |
-| `unauthorized` | 401 | 缺 key / key 无效或过期 / 运维面缺 admin token | 补正确凭据；**不要重试** |
+| `unauthorized` | 401 | 缺 key / key 无效或过期 / 运维面缺 admin token | 补正确凭据；**不要重试**。⚠️ **客户端请按 HTTP `401` 状态码判断，不要按 `code` 字面**（该字段是我们自造的，见下方偏离表） |
 | `forbidden` | 403 | key 有效，但该 key 不被允许用这个模型或能力 | 换模型/能力，或申请授权 |
 
 ### 与 OpenAI 官方码的对齐约定
@@ -31,12 +31,15 @@
 |---|---|---|---|
 | 429 限流 | `rate_limit_exceeded` | `rate_limit_exceeded` | ✅ 完全一致（细分原因在 `reason`） |
 | 404 模型不存在 | `model_not_found` | `model_not_found` | ✅ 一致 |
-| 401 未授权 | `unauthorized` | `invalid_api_key` | ⚠️ **有意偏离**：我们故意不区分"没给 key"与"key 错/过期"（区分只会帮攻击者探测），`invalid_api_key` 暗示"给了但无效"，不适合 |
+| 401 未授权 | `unauthorized` | `invalid_api_key` | ⚠️ **有意偏离**：我们故意不区分"没给 key"与"key 错/过期"（区分只会帮攻击者探测），`invalid_api_key` 暗示"给了但无效"，不适合。**客户端请按 HTTP `401` 状态码判断，不要按 `code` 字面** |
 | 400 缺 model | `missing_model` | `invalid_request_error` | ⚠️ 有意偏离：官方码太笼统，客户端无法据此自动补齐字段 |
 | 参数不合法 | `capability_unsupported` / `bad_request` | `invalid_request_error` | ⚠️ 有意偏离，理由同上 |
 
 上表标 ⚠️ 的三项是**有意偏离**，不是遗漏；判断依据是"该码是否会被客户端程序化分支"——
 会分支的对齐，只用于人读的用更精确的自造码。
+
+**偏离项的客户端判据**：凡标 ⚠️ 的行，**请按 HTTP 状态码判断**（`401` / `400`），
+不要按 `code` 字面匹配——`code` 只用于日志与人工排查。
 
 响应体形状（除二进制音频流本身）：
 
