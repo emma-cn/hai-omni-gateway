@@ -115,16 +115,32 @@ async def test_404_is_self_describing(gw):
             assert expect in flat, f"404 自描述里缺 {expect}"
 
 
-async def test_response_has_request_id_and_rate_limit_headers(gw):
-    """A-404 / A-405：每个响应都带 x-request-id 与 x-ratelimit-*。"""
+async def test_response_has_request_id_but_no_fake_rate_headers(gw):
+    """A-404 / A-405：x-request-id 永远带；**不限额时不发**限流头。
+
+    为什么不发 `limit: 0`：OpenAI 语义里 0 = "你没有额度"，
+    按 remaining 退避的客户端会立刻限流自己（假头比缺头危险）。
+    """
+    from conftest import base_cfg
+
     async with gw() as g:
-        r = await g.client.get("/v1/models")
+        r = await g.client.get("/v1/models")          # loopback，无 key = 不限
         assert r.headers.get("x-request-id"), "缺 x-request-id"
-        assert "x-ratelimit-limit-requests" in {k.lower() for k in r.headers}
-        assert "x-ratelimit-remaining-requests" in {k.lower() for k in r.headers}
-        # 客户端给了 id 就沿用，便于全链路串联
+        lowered = {k.lower() for k in r.headers}
+        assert "x-ratelimit-limit-requests" not in lowered, "不限额时不该发 limit 头"
         r2 = await g.client.get("/v1/models", headers={"x-request-id": "abc123"})
         assert r2.headers["x-request-id"] == "abc123"
+
+    # 有限额的 key：必须发真实值，且 remaining ≤ limit
+    raw = base_cfg()
+    raw["auth"] = dict(raw["auth"], keys=[{"name": "k", "key": "sk-1", "rpm": 5}])
+    async with gw(raw, client_host="203.0.113.9") as g:
+        r = await g.client.get("/v1/models", headers={"authorization": "Bearer sk-1"})
+        assert r.status_code == 200
+        limit = int(r.headers["x-ratelimit-limit-requests"])
+        remaining = int(r.headers["x-ratelimit-remaining-requests"])
+        assert limit == 5
+        assert 0 <= remaining <= limit, f"remaining={remaining} 超出 [0,{limit}]"
 
 
 async def test_models_is_a_capability_catalog(gw):

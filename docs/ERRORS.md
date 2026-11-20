@@ -37,10 +37,13 @@
 
 | 头 | 含义 |
 |---|---|
-| `x-ratelimit-limit-requests` | 该 key 每分钟请求上限；**`0` = 不限** |
-| `x-ratelimit-remaining-requests` | 当前窗口剩余（`0` 且 limit=0 表示不限） |
+| `x-request-id` | **永远带**。客户端传了就沿用（便于跨服务串联），没传则服务端生成 |
+| `x-ratelimit-limit-requests` | 该 key 每分钟请求上限。**只在真的有限额时才发**；缺头 = 不限 |
+| `x-ratelimit-remaining-requests` | 当前窗口剩余，恒 `≤ limit` |
 | `x-ratelimit-reset-requests` | 距离窗口重置的秒数 |
-| `x-request-id` | 全链路请求 ID：客户端传了就沿用，没传则服务端生成 |
+
+**为什么不发 `limit: 0`**：OpenAI 语义里 0 表示"你没有额度"，按 `remaining` 做退避的
+客户端会立刻限流自己。缺头（=不限）比假头安全，OpenAI 本身也不强制发这组头。
 
 ## `Retry-After`
 

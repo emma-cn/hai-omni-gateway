@@ -217,13 +217,17 @@ def create_app(config_path: str) -> FastAPI:
             )
         request.state.identity = ident
         response = await call_next(request)
-        # 限流头与请求 ID 一并落在**所有**响应上（含错误响应），
-        # 客户端据此决定退避，不需要额外探测。
+        # 请求 ID 永远带；限流头**只在真的有限额时才发**。
+        #
+        # 为什么不发 "limit: 0"：OpenAI 语义里 0 = "你没有额度"，
+        # 按 remaining 做退避的客户端会立刻限流自己 —— 那组头不传递信息，只传递恐慌。
+        # 缺头比假头安全（OpenAI 也不强制发这组头）。
         limit, remaining, reset = authr.rate_snapshot(ident)
         response.headers["x-request-id"] = rid
-        response.headers["x-ratelimit-limit-requests"] = str(limit)
-        response.headers["x-ratelimit-remaining-requests"] = str(remaining)
-        response.headers["x-ratelimit-reset-requests"] = str(reset)
+        if limit > 0:
+            response.headers["x-ratelimit-limit-requests"] = str(limit)
+            response.headers["x-ratelimit-remaining-requests"] = str(remaining)
+            response.headers["x-ratelimit-reset-requests"] = str(reset)
         return response
 
     @app.get("/healthz")
