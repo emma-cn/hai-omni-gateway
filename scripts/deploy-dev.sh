@@ -41,8 +41,9 @@ if [ -f "$ENVFILE" ]; then
   echo "   注入 env 文件: $ENVFILE"
 fi
 # shellcheck disable=SC2086
-# 账本目录挂到宿主机：能直接 jq / 轮转 / 备份，容器重建也不丢历史
-LEDGER_DIR="${OMNI_LEDGER_DIR:-$HOME/workspace/hound/hai-omni-gateway/logs}"
+# 账本目录挪出代码仓：运行期数据不该长在仓里（账本里带客户端 IP，
+# 一旦 `git add -A` 就会把内网地址提交上去）。容器内路径仍是 /var/log/omni。
+LEDGER_DIR="${OMNI_LEDGER_DIR:-$HOME/.local/state/hai-omni-gateway/logs}"
 mkdir -p "$LEDGER_DIR"
 docker run -d --name "$NAME" --restart unless-stopped --network host $ENVVOL \
   -v "$LEDGER_DIR:/var/log/omni" \

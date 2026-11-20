@@ -11,3 +11,7 @@ dist/
 env/dev/gateway.env
 env/**/*.env.local
 *.bak-*
+
+# 运行期数据：账本/日志绝不入库（账本里带客户端 IP）
+logs/
+*.jsonl
