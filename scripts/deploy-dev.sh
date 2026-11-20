@@ -32,7 +32,16 @@ docker build -f docker/Dockerfile --build-arg OMNI_BUILD="$VER" -t "$IMAGE" .
 
 echo "== 2) 重启容器 =="
 docker rm -f "$NAME" >/dev/null 2>&1 || true
-docker run -d --name "$NAME" --restart unless-stopped --network host \
+# 可选 env 文件：key/token 这类东西不该写进 gateway.yaml（配置会被拷来拷去），
+# 用 docker --env-file 注入，文件本身 600 且被 .gitignore 忽略。
+ENVVOL=""
+ENVFILE="${OMNI_ENV_FILE:-$ROOT/env/dev/gateway.env}"
+if [ -f "$ENVFILE" ]; then
+  ENVVOL="--env-file $ENVFILE"
+  echo "   注入 env 文件: $ENVFILE"
+fi
+# shellcheck disable=SC2086
+docker run -d --name "$NAME" --restart unless-stopped --network host $ENVVOL \
   -e LOG_LEVEL="${LOG_LEVEL:-INFO}" -e OMNI_GATEWAY_CONFIG=/app/config/gateway.yaml \
   -v "$CONFIG:/app/config/gateway.yaml:ro" \
   "$IMAGE" >/dev/null

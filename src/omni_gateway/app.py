@@ -210,6 +210,13 @@ def create_app(config_path: str) -> FastAPI:
             headers = {"x-request-id": rid}
             if e.status == 429:
                 headers["Retry-After"] = "60"
+                # 429 也要带限流头：客户端据此知道额度上限与何时恢复
+                rate = getattr(e, "rate", None)
+                if rate:
+                    limit, remaining, reset = rate
+                    headers["x-ratelimit-limit-requests"] = str(limit)
+                    headers["x-ratelimit-remaining-requests"] = str(remaining)
+                    headers["x-ratelimit-reset-requests"] = str(reset)
             return JSONResponse(
                 {"error": {"message": e.message, "type": e.code, "code": e.code}},
                 status_code=e.status,

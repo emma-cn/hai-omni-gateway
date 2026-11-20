@@ -38,11 +38,19 @@ ADMIN_PREFIXES = ("/admin", "/ui", "/metrics")
 class AuthError(Exception):
     """鉴权失败。`status` 是给客户端看的 HTTP 码，`code` 是机器码。"""
 
-    def __init__(self, status: int, code: str, message: str) -> None:
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        message: str,
+        rate: tuple[int, int, int] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        # (limit, remaining, reset) —— 429 时带上，否则客户端不知道何时能重试
+        self.rate = rate
 
 
 @dataclass
@@ -185,7 +193,10 @@ class Authenticator:
         now = self._now()
         if not bucket.allow(key.rpm, now):
             raise AuthError(
-                429, "rate_limited", f"超出该 key 的速率上限（{key.rpm} rpm）"
+                429,
+                "rate_limited",
+                f"超出该 key 的速率上限（{key.rpm} rpm）",
+                rate=(key.rpm, 0, bucket.retry_after(now)),
             )
         return Identity(name=key.name, key=key)
 

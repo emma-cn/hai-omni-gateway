@@ -25,6 +25,22 @@
   GitHub 上的 `v0.1.2`（bump 提交）内容不同却同号，即"同号不同内容"。
 - 已发布各号的内容：`v0.1.0 = 6f4131c7`、`v0.1.1 = a8bad3f5`、`v0.1.2 = d534ebca`、`v0.1.3 = 07a03783`。
 
+## [0.1.10] - 2026-11-20
+
+### Added
+- **可验证的限额路径（A-404b）**：dev 上新增一把 `rpm: 5` 的测试 key，
+  通过 `key_env: OMNI_KEY_RPMTEST` 从 `env/dev/gateway.env`（600，已 gitignore）注入；
+  `deploy-dev.sh` 支持 `--env-file` 注入密钥，密钥不再写进 `gateway.yaml`
+- 429 响应现在也带 `x-ratelimit-{limit,remaining,reset}-requests`（连同 `Retry-After`），
+  客户端据此知道额度上限与恢复时间
+
+### 实测（走非 loopback 地址，key rpm=5，连打 6 次）
+```
+第1..5次  200  limit=5  remaining=4,3,2,1,0  reset=59
+第6次     429  retry-after=60  limit=5  remaining=0  reset=59
+          {"error":{"type":"rate_limited","code":"rate_limited","message":"超出该 key 的速率上限（5 rpm）"}}
+```
+
 ## [0.1.9] - 2026-11-20
 
 ### Fixed

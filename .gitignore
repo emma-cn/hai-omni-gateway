@@ -6,3 +6,8 @@ dist/
 *.egg-info/
 .ruff_cache/
 .pytest_cache/
+
+# 运行时密钥（key / admin token）：用 docker --env-file 注入，绝不入库
+env/dev/gateway.env
+env/**/*.env.local
+*.bak-*
