@@ -19,6 +19,7 @@
 | `model_not_found` | 404 | `model` 不在配置里 | 不要重试；检查 `model` 字段 |
 | `capability_unsupported` | 400 | 该模型没有声明这个接口需要的能力 | 不要重试；换个模型或换接口 |
 | `missing_model` | 400 | 请求里没有 `model` | 补上 `model`（开放产品**不猜**候选） |
+| `not_found` | 404 | 没有这个端点（响应体会一并列出端点族，供客户端自解） | 检查路径或版本 |
 | `unauthorized` | 401 | 缺 key / key 无效或过期 / 运维面缺 admin token | 补正确凭据；**不要重试** |
 | `forbidden` | 403 | key 有效，但该 key 不被允许用这个模型或能力 | 换模型/能力，或申请授权 |
 | `rate_limited` | 429 | 超出该 key 的 `rpm` | 按 `Retry-After` 退避 |
@@ -31,6 +32,15 @@
 
 > 历史包袱：`type` 与 `code` 目前同值（早期 `code` 塞的是 HTTP 数字，已废弃）。
 > 客户端应只依赖 `type`/`code` 的字符串值，不要依赖 HTTP 状态做分支。
+
+## 限流与追踪响应头（所有响应都带，含错误响应）
+
+| 头 | 含义 |
+|---|---|
+| `x-ratelimit-limit-requests` | 该 key 每分钟请求上限；**`0` = 不限** |
+| `x-ratelimit-remaining-requests` | 当前窗口剩余（`0` 且 limit=0 表示不限） |
+| `x-ratelimit-reset-requests` | 距离窗口重置的秒数 |
+| `x-request-id` | 全链路请求 ID：客户端传了就沿用，没传则服务端生成 |
 
 ## `Retry-After`
 

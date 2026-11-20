@@ -34,6 +34,13 @@ class ModelConfig:
     # （视频生成一次几分钟，绝不能中途被挤下去）
     lease_s: float = 0.0
 
+    # ---- 能力目录（/v1/models 会原样输出，OpenAI 客户端据此自解释）----
+    # 只放"我们真的知道"的值；不知道就留空，绝不编造采样率/语种。
+    languages: list[str] = field(default_factory=list)      # 例 ["zh","en"]；空 = 未声明
+    max_input_chars: int = 0                                # 0 = 未声明/不限
+    sample_rates: list[int] = field(default_factory=list)   # 输出采样率，例 [48000]
+    formats: list[str] = field(default_factory=list)        # 例 ["wav","mp3"]
+
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
 

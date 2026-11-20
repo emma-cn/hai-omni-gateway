@@ -20,6 +20,7 @@ import contextlib
 import json
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -27,8 +28,9 @@ from typing import Any
 import httpx
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import __version__
+from . import __version__, catalog
 from .auth import Authenticator, AuthError
 from .config import GatewayConfig
 from .scheduler import (
@@ -143,6 +145,41 @@ def create_app(config_path: str) -> FastAPI:
     app.state.sched = sched
     app.state.client = client
 
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        """404 自描述：告诉客户端"这里到底有什么"。
+
+        历史问题（issue #10）：客户端轮询 `/api/events` 一直拿到默认 404（空体），
+        分不清是路径写错、版本不对、还是服务没实现 —— 只能反复重试。
+        现在把端点族一并返回，客户端一次就能自解。
+        """
+        rid = getattr(request.state, "request_id", "")
+        if exc.status_code == 404:
+            return JSONResponse(
+                {
+                    "error": {
+                        "message": f"没有这个端点：{request.url.path}",
+                        "type": "not_found",
+                        "code": "not_found",
+                        "param": str(request.url.path),
+                    },
+                    "endpoints": catalog.endpoint_families(),
+                },
+                status_code=404,
+                headers={"x-request-id": rid},
+            )
+        return JSONResponse(
+            {
+                "error": {
+                    "message": str(getattr(exc, "detail", exc)),
+                    "type": "http_error",
+                    "code": exc.status_code,
+                }
+            },
+            status_code=exc.status_code,
+            headers={"x-request-id": rid},
+        )
+
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
         """鉴权放在路由匹配**之前**。
@@ -150,6 +187,14 @@ def create_app(config_path: str) -> FastAPI:
         历史教训（A-103）：以前"未知模型 404"会先于"无凭据 401"返回，
         等于把某个模型名存不存在泄露给未鉴权客户端。
         """
+        # 请求 ID：客户端给了就沿用（便于跨服务串联），没给就生成一个。
+        # 全链路返回，客户端报障时能直接对上服务端日志。
+        rid = (
+            request.headers.get("x-request-id")
+            or request.headers.get("x-correlation-id")
+            or uuid.uuid4().hex
+        )
+        request.state.request_id = rid
         peer = request.client.host if request.client else None
         # 浏览器里打开 /ui 时没法加 Authorization 头，允许 ?token= 传 admin token
         # （只对运维面生效；业务面仍要求 header，避免 token 出现在 URL/日志里）
@@ -162,7 +207,7 @@ def create_app(config_path: str) -> FastAPI:
         try:
             ident = authr.authenticate(request.url.path, peer, headers)
         except AuthError as e:
-            headers = {}
+            headers = {"x-request-id": rid}
             if e.status == 429:
                 headers["Retry-After"] = "60"
             return JSONResponse(
@@ -171,7 +216,15 @@ def create_app(config_path: str) -> FastAPI:
                 headers=headers,
             )
         request.state.identity = ident
-        return await call_next(request)
+        response = await call_next(request)
+        # 限流头与请求 ID 一并落在**所有**响应上（含错误响应），
+        # 客户端据此决定退避，不需要额外探测。
+        limit, remaining, reset = authr.rate_snapshot(ident)
+        response.headers["x-request-id"] = rid
+        response.headers["x-ratelimit-limit-requests"] = str(limit)
+        response.headers["x-ratelimit-remaining-requests"] = str(remaining)
+        response.headers["x-ratelimit-reset-requests"] = str(reset)
+        return response
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
@@ -191,18 +244,29 @@ def create_app(config_path: str) -> FastAPI:
             if capability and capability not in m.capabilities:
                 continue
             card = sched.card_of(name)
-            data.append({
+            status = card.state(name)
+            entry: dict[str, Any] = {
                 "id": name,
                 "object": "model",
                 "owned_by": "hai-omni-gateway",
-                "meta": {"omnigateway": {
+            }
+            # 能力目录字段平铺在模型对象上（OpenAI 客户端习惯直接读），
+            # 同时保留 meta.omnigateway 给运维面用。
+            entry.update(catalog.catalog_of(
+                m, status=status, inflight=card.inflight(name), awake=status == "awake"
+            ))
+            # meta.omnigateway 保留 status/inflight 以兼容既有客户端与用例
+            # （顶层的是"能力目录"口径，meta 里的是"运维面"口径，同一事实两处可读）
+            entry["meta"] = {
+                "omnigateway": {
                     "card": m.card,
-                    "capabilities": m.capabilities,
-                    "status": card.state(name),
+                    "status": status,
                     "inflight": card.inflight(name),
+                    "capabilities": m.capabilities,
                     "lease_s": m.lease_s,
-                }},
-            })
+                }
+            }
+            data.append(entry)
         return {"object": "list", "data": data}
 
     # ------------------------------------------------------------ 透传

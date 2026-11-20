@@ -194,6 +194,26 @@ class Authenticator:
         bucket = self._buckets.get(name)
         return bucket.retry_after(self._now()) if bucket else 1
 
+    def rate_snapshot(self, identity: Identity | None) -> tuple[int, int, int]:
+        """返回 (limit, remaining, reset_seconds) 供 x-ratelimit-* 响应头使用。
+
+        limit=0 表示**不限**（loopback 或无 key 的内部调用）。
+        为什么把"不限"编码成 0 而不是省略头：客户端拿到缺失的头只能当"不知道"，
+        而 0 有明确含义（见 docs/ERRORS.md），可据此决定要不要退避。
+        """
+        key = getattr(identity, "key", None)
+        if key is None or key.rpm <= 0:
+            return 0, 0, 0
+        bucket = self._buckets.get(key.name)
+        if bucket is None:
+            return key.rpm, key.rpm, 0
+        now = self._now()
+        window_start = now - 60.0
+        bucket.hits = [t for t in bucket.hits if t >= window_start]
+        remaining = max(0, key.rpm - len(bucket.hits))
+        reset = bucket.retry_after(now) if bucket.hits else 0
+        return key.rpm, remaining, reset
+
 
 def loopback_bypass(cfg) -> bool:
     return bool(getattr(cfg, "loopback_bypass", True))

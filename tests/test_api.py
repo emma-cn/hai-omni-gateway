@@ -103,6 +103,43 @@ async def test_unknown_model_404(gw):
         assert "/models/NOPE" in err["message"]
 
 
+async def test_404_is_self_describing(gw):
+    """A-403 / issue #10：未知路径的 404 要列出端点族，客户端能自解。"""
+    async with gw() as g:
+        r = await g.client.get("/api/events")     # 旧页面轮询的那个路径
+        assert r.status_code == 404
+        body = json_of(r)
+        assert body["error"]["code"] == "not_found"
+        flat = str(body["endpoints"])
+        for expect in ("/v1/audio/speech", "/v1/models", "/v1/videos"):
+            assert expect in flat, f"404 自描述里缺 {expect}"
+
+
+async def test_response_has_request_id_and_rate_limit_headers(gw):
+    """A-404 / A-405：每个响应都带 x-request-id 与 x-ratelimit-*。"""
+    async with gw() as g:
+        r = await g.client.get("/v1/models")
+        assert r.headers.get("x-request-id"), "缺 x-request-id"
+        assert "x-ratelimit-limit-requests" in {k.lower() for k in r.headers}
+        assert "x-ratelimit-remaining-requests" in {k.lower() for k in r.headers}
+        # 客户端给了 id 就沿用，便于全链路串联
+        r2 = await g.client.get("/v1/models", headers={"x-request-id": "abc123"})
+        assert r2.headers["x-request-id"] == "abc123"
+
+
+async def test_models_is_a_capability_catalog(gw):
+    """A-406/407/408：/v1/models 要带 modalities / languages / max_input_chars。"""
+    async with gw() as g:
+        r = await g.client.get("/v1/models")
+        entry = json_of(r)["data"][0]
+        assert "modalities" in entry
+        assert entry["modalities"]["output"], "modalities.output 不该为空"
+        assert "languages" in entry
+        assert "max_input_chars" in entry
+        # 未声明必须显式说明，别让客户端把"没填"当成"不支持"
+        assert "declared" in entry
+
+
 async def test_missing_model_is_rejected_not_guessed(gw):
     """缺 model 一律 400 missing_model —— 即使候选唯一也不猜。
 

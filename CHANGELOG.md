@@ -25,6 +25,24 @@
   GitHub 上的 `v0.1.2`（bump 提交）内容不同却同号，即"同号不同内容"。
 - 已发布各号的内容：`v0.1.0 = 6f4131c7`、`v0.1.1 = a8bad3f5`、`v0.1.2 = d534ebca`、`v0.1.3 = 07a03783`。
 
+## [0.1.8] - 2026-11-20
+
+### Added
+- **能力目录（P0-4 / A-403~A-408）**
+  - `GET /v1/models` 变能力目录：`modalities`（由 capabilities 推导）、`languages`、
+    `max_input_chars`、`sample_rates`、`formats`、`latency_class`、`declared`
+  - `declared` 显式区分"没填"与"不支持"——能力目录一旦会撒谎，客户端就没法据此分支
+  - 404 自描述：未知路径返回 `not_found` + 端点族清单（顺带收掉 issue #10 的 `/api/events`）
+  - 所有响应带 `x-request-id`（客户端给了就沿用）、`x-ratelimit-{limit,remaining,reset}-requests`
+
+### 说明
+- 目录字段只输出**真的知道**的值：语种/采样率/格式未配置就是空数组 + `declared=false`，
+  不编造"支持 N 种语言"这类数字
+- `x-ratelimit-limit-requests: 0` 表示不限（loopback 或无 key 内部调用）
+
+### 实测
+- pytest：108 passed, 4 xfailed（新增 404 自描述 / 响应头 / 能力目录三条）
+
 ## [0.1.7] - 2026-11-20
 
 ### Security
