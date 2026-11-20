@@ -59,6 +59,9 @@
   .st{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
   .st.awake{color:var(--ok);border-color:#1f4429;background:#0d1f13}
   .st.asleep{color:var(--dim)}
+  /* absent = 后端容器/端口不存在，永远叫不醒；和"睡着"是两件事，
+     必须让用户一眼看出来，否则他会点唤醒然后白等两分钟 */
+  .st.absent{color:var(--err);border-color:#4b1d1d;background:#1f0f0f}
   audio{width:100%;margin-top:10px}
   .split{display:grid;grid-template-columns:1.15fr .85fr;gap:14px;align-items:start}
   @media(max-width:900px){.split{grid-template-columns:1fr}}
@@ -229,12 +232,16 @@ function render(s){
 
   document.getElementById('models').innerHTML = (s.models||[]).map(m=>{
     const inflight = (m.inflight||0);
+    // 三态：absent（后端不存在，叫不醒）/ awake / asleep
+    const absent = m.status === 'absent' || m.backend_alive === false;
     const sleeping = m.status !== 'awake';
+    const stCls = absent ? 'absent' : (sleeping ? 'asleep' : 'awake');
+    const stTxt = absent ? '后端不存在' : (sleeping ? '睡眠' : '醒着');
     return `<tr>
       <td><code>${esc(m.name)}</code></td>
       <td>${(m.capabilities||[]).map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</td>
       <td class="muted">${esc(m.card)}</td>
-      <td><span class="st ${sleeping?'asleep':'awake'}">${sleeping?'睡眠':'醒着'}</span></td>
+      <td><span class="st ${stCls}" title="${absent?'端口不通/容器不在，唤醒会失败':'可唤醒'}">${stTxt}</span></td>
       <td>${inflight||'—'}</td>
       <td class="muted">${m.ttl_s>0? m.ttl_s+'s':'永不睡'}</td>
       <td>

@@ -131,6 +131,10 @@ def create_app(config_path: str) -> FastAPI:
     # 上游排队深度探针：每 5s 抓一次 vLLM 的 num_requests_waiting/running。
     # 没有它，「44 秒里多少是等 max_num_seqs」就只能靠推理（A-602 的归因要求可证）。
     upstream_queue: dict[str, dict[str, float]] = {}
+    # 后端是否**存在**（端口通/health 200）。与"睡着"是两件事：
+    #   睡着   = 能唤醒，等 1~2 秒
+    #   不存在 = 永远叫不醒，用户点了唤醒只会白等两分钟
+    upstream_alive: dict[str, bool] = {}
 
     async def _probe_upstream() -> None:
         interval = cfg.upstream_probe_interval_s
@@ -138,6 +142,15 @@ def create_app(config_path: str) -> FastAPI:
             return
         while True:
             for name, m in cfg.models.items():
+                # 存活性：连不上/非 200 就是 absent。睡着时 /health 仍会回 200，
+                # 所以这个探测**不会**把"睡着"误判成"不存在"。
+                try:
+                    r = await client.get(
+                        m.base_url + m.health_path, timeout=2.0
+                    )
+                    upstream_alive[name] = r.status_code == 200
+                except Exception:  # noqa: BLE001 - 探测失败即视为不可达
+                    upstream_alive[name] = False
                 sample = await scrape_vllm_queue(client, m.base_url)
                 if sample:
                     upstream_queue[name] = sample
@@ -309,6 +322,18 @@ def create_app(config_path: str) -> FastAPI:
             # 没注入时退回版本号，便于本地裸跑。
             "build": os.environ.get("OMNI_BUILD") or __version__,
             "cards": {name: {"awake": card.awake_model} for name, card in sched.cards.items()},
+            # 后端存活性：区分"睡着（能唤醒）"与"不存在（永远叫不醒）"。
+            # 客户端/监控据此决定是重试还是报障，不要让人点了唤醒白等。
+            "upstream_alive": dict(upstream_alive),
+            "models": {
+                name: {
+                    "status": "absent"
+                    if upstream_alive.get(name) is False
+                    else sched.card_of(name).state(name),
+                    "backend_alive": upstream_alive.get(name),
+                }
+                for name in cfg.models
+            },
         }
 
     @app.get("/v1/models")
@@ -319,6 +344,11 @@ def create_app(config_path: str) -> FastAPI:
                 continue
             card = sched.card_of(name)
             status = card.state(name)
+            # 后端不可达时对外明确报 absent，而不是伪装成 asleep：
+            # 用户看到"睡着"会以为等一会就好，实际永远等不到。
+            alive = upstream_alive.get(name)
+            if alive is False:
+                status = "absent"
             entry: dict[str, Any] = {
                 "id": name,
                 "object": "model",
@@ -329,6 +359,7 @@ def create_app(config_path: str) -> FastAPI:
             entry.update(catalog.catalog_of(
                 m, status=status, inflight=card.inflight(name), awake=status == "awake"
             ))
+            entry["backend_alive"] = alive  # None = 还没探到
             # meta.omnigateway 保留 status/inflight 以兼容既有客户端与用例
             # （顶层的是"能力目录"口径，meta 里的是"运维面"口径，同一事实两处可读）
             entry["meta"] = {
@@ -747,6 +778,7 @@ def create_app(config_path: str) -> FastAPI:
                     "card": m.card,
                     "capabilities": m.capabilities,
                     "status": sched.card_of(name).state(name),
+                    "backend_alive": upstream_alive.get(name),
                     "inflight": sched.card_of(name).inflight(name),
                     "ttl_s": m.ttl_s,
                     "lease_s": m.lease_s,
