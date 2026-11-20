@@ -71,6 +71,92 @@ ENDPOINTS: dict[tuple[str, str], str] = {
 # 上游本身就是异步任务接口的前缀：POST 只返回 id，产物另取
 ASYNC_PREFIXES = ("/v1/videos",)
 
+# 上游错误体归一化：vLLM 的 FastAPI 默认错误长这样
+#   {"error": {"message": "...", "type": "BadRequestError", "param": null, "code": 400}}
+# 注意 `code` 是**数字**——直接透传就等于网关自己也在用两套错误风格（PRD §4.2 明令禁止）。
+# 客户端要按 code 分支，就只能是机器码。
+_STATUS_CODES = {
+    400: "bad_request",
+    401: "unauthorized",
+    403: "forbidden",
+    404: "not_found",
+    409: "conflict",
+    413: "payload_too_large",
+    422: "invalid_request_error",
+    429: "rate_limit_exceeded",
+}
+# 上游把**调用方的错**报成 5xx 的典型措辞（案例：ref 路径不存在 → 500 + 服务器绝对路径）
+_CLIENT_FAULT_HINTS = (
+    "no such file",
+    "not found",
+    "must be",
+    "invalid",
+    "requires",
+    "unsupported",
+    "too long",
+    "exceeds",
+    "cannot find",
+)
+# 从消息里反推 param：拿得到 param，客户端才能自动纠正而不是人肉读日志
+_PARAM_HINTS = (("ref_audio", "ref_audio"), ("voice", "voice"), ("model", "model"))
+
+
+def _scrub_paths(text: str) -> str:
+    """抹掉服务器绝对路径：不把文件系统细节吐给外部调用方。
+
+    只处理引号包起来的路径与明显的多段绝对路径，避免误伤 URL
+    （`http://host/a/b` 里 `//a/b` 不该被抹）。
+    """
+    import re as _re
+
+    text = _re.sub(r"'(/[^']*)'", "'<path>'", text)
+    text = _re.sub(r'"(/[^"]*)"', '"<path>"', text)
+    text = _re.sub(r"(?<![:/\w])/(?:[\w.\-]+/)+[\w.\-]+", "<path>", text)
+    return text
+
+
+def normalize_upstream_error(
+    status: int, body: bytes, request_body: bytes = b""
+) -> tuple[int, dict[str, Any]]:
+    """把上游错误归一化成我们的错误体。返回 (status, error_object)。"""
+    message = ""
+    try:
+        data = json.loads(body or b"{}")
+    except Exception:
+        data = {}
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            message = str(err.get("message") or "")
+        elif isinstance(err, str):
+            message = err
+        if not message:
+            message = str(data.get("detail") or data.get("message") or "")
+    if not message:
+        message = (body or b"").decode("utf-8", "replace")[:500] or f"上游返回 {status}"
+
+    message = _scrub_paths(message).strip()
+    low = message.lower()
+
+    # 上游把客户端错误报成 5xx 的，纠正成 400：这是调用方的问题，重试也不会好
+    if status >= 500 and any(h in low for h in _CLIENT_FAULT_HINTS):
+        status = 400
+
+    code = _STATUS_CODES.get(status) or ("upstream_error" if status >= 500 else "error")
+    out: dict[str, Any] = {"message": message, "type": code, "code": code}
+    for hint, param in _PARAM_HINTS:
+        if hint in low:
+            out["param"] = param
+            break
+    else:
+        # 消息里没提字段名时，退回看请求体带了什么：
+        # `param` 的价值就在于客户端能自动纠正，猜不准就别乱填。
+        for hint, param in _PARAM_HINTS:
+            if hint.encode() in (request_body or b""):
+                out["param"] = param
+                break
+    return status, out
+
 
 def _error(status: int, message: str, type_: str = "gateway_error", **extra: Any) -> JSONResponse:
     headers: dict[str, str] = {}
@@ -498,6 +584,21 @@ def create_app(config_path: str) -> FastAPI:
             # 异步任务接口（视频）：POST 只返回 id，产物在别处取——
             # "这条请求在飞"不代表模型忙，立即释放占位，由 lease 负责不让它被挤掉。
             stats["status"] = upstream.status_code
+            # 非 2xx：读全量、归一化、按我们的错误体返回。
+            # 不这样做的话，客户端会同时收到两套错误格式（我们的机器码 + 上游的数字 code）。
+            if upstream.status_code >= 400:
+                err_body = await upstream.aread()
+                await upstream.aclose()
+                # 必须先把名额还回去：这条路径不经过 body_iter，漏了就是并发槽永久泄漏
+                await _release()
+                status, err = normalize_upstream_error(
+                    upstream.status_code, err_body, request_body=body
+                )
+                stats["status"] = status
+                stats["error"] = err["code"]
+                _record_request(request, model, path, stats, t_req)
+                return JSONResponse({"error": err}, status_code=status)
+
             if path.startswith(ASYNC_PREFIXES) and request.method == "POST":
                 await _release()
 
