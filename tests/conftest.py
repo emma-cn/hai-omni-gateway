@@ -77,6 +77,8 @@ class FakeBackend:
         self.raises: set[str] = set()
         self.delays: dict[str, float] = {}
         self.dead: set[str] = set()
+        # 上游 /metrics 文本（vLLM 格式）；空 = 未开启指标
+        self.metrics: str = ""
         # False = 后端没有 /v1/omni/status（老镜像），网关应回退"盲睡"
         self.status_supported: bool = True
         # host -> "awake" / "asleep"
@@ -158,6 +160,12 @@ class FakeBackend:
             code, text = self.errors[action]
             return _resp(code, text.encode(), content_type="text/plain")
 
+        if path == "/metrics":
+            # 默认 404：模拟"上游没开 Prometheus 指标"，探针应静默跳过
+            if not self.metrics:
+                return _resp(404, b"not found", content_type="text/plain")
+            return _resp(200, self.metrics.encode(), content_type="text/plain")
+
         if action == "status":
             # 默认 404：模拟"还没打 status 补丁"的老镜像，逼网关走回退路径
             if self.status_supported is False:
@@ -221,6 +229,8 @@ def base_cfg() -> dict[str, Any]:
         # 账本默认关：多数用例与账本无关，且不该往 /var/log 写东西。
         # 专门测账本的用例自己开一个 tmp 路径（tests/test_ledger.py）。
         "ledger": {"enabled": False},
+        # 上游排队探针默认关：多数用例断言"上游零调用"，探针会污染这些断言
+        "upstream_probe_interval_s": 0,
         # loopback 免 key；"testclient" 是 ASGI transport 的 peer 名
         "auth": {
             "loopback_bypass": True,

@@ -103,6 +103,25 @@ async def test_unknown_model_404(gw):
         assert "/models/NOPE" in err["message"]
 
 
+async def test_voices_without_model_returns_all_models(gw):
+    """发现类端点不该强制 model：不带就汇总全部语音模型的音色，每条标 model。
+
+    "model 必填"是为了防**生成**时静默落到别的模型；列表接口没有这个风险，
+    强制必填只会逼客户端先查一次 /v1/models。
+    """
+    from conftest import multi_cfg
+
+    async with gw(multi_cfg()) as g:
+        r = await g.client.get("/v1/audio/voices")
+        assert r.status_code == 200, "不带 model 的 voices 应当 200"
+        body = json_of(r)
+        assert "data" in body and "voices" in body
+        assert body["models_queried"], "应列出查询了哪些模型"
+        # 每条音色都带 model，客户端能区分来源
+        for v in body["data"]:
+            assert v.get("model"), f"音色条目缺 model：{v}"
+
+
 async def test_404_is_self_describing(gw):
     """A-403 / issue #10：未知路径的 404 要列出端点族，客户端能自解。"""
     async with gw() as g:

@@ -23,6 +23,37 @@ from .config import ModelConfig
 log = logging.getLogger(__name__)
 
 
+async def scrape_vllm_queue(client, base_url: str) -> dict[str, float]:
+    """读上游 vLLM 自己的排队数（`vllm_omni:num_requests_waiting`）。
+
+    为什么需要它：网关只能看见"首字节之前有多久"，看不见这久里到底有几个请求
+    在 max_num_seqs 前面排队。上游把这两个数都吐在 /metrics 上，抓一下就有，
+    不必让后端改代码——这样 A-602 的归因才是可证的，而不是靠推理。
+    """
+    out: dict[str, float] = {}
+    try:
+        r = await client.get(base_url.rstrip("/") + "/metrics", timeout=3.0)
+        if r.status_code != 200:
+            return out
+        for line in r.text.splitlines():
+            if line.startswith("#"):
+                continue
+            if "num_requests_waiting" in line:
+                out["waiting"] = _num(line)
+            elif "num_requests_running" in line:
+                out["running"] = _num(line)
+    except Exception:  # noqa: BLE001 - 探针失败不该影响任何请求
+        return out
+    return out
+
+
+def _num(line: str) -> float:
+    try:
+        return float(line.rsplit(" ", 1)[1])
+    except (IndexError, ValueError):
+        return 0.0
+
+
 class OmniClient:
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._c = client

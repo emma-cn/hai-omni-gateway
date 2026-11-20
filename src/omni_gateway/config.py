@@ -145,6 +145,8 @@ class GatewayConfig:
     queue_limit: int = 200         # 每个模型排队上限，超了直接 429
     auth: AuthConfig = field(default_factory=AuthConfig)
     ledger: LedgerConfig = field(default_factory=LedgerConfig)
+    # 上游排队深度采样间隔（秒）；0 = 关闭采样
+    upstream_probe_interval_s: float = 5.0
 
     @staticmethod
     def load(path: str | Path) -> GatewayConfig:
@@ -190,6 +192,7 @@ class GatewayConfig:
             queue_limit=int(raw.get("queue_limit", 200)),
             auth=auth,
             ledger=ledger,
+            upstream_probe_interval_s=float(raw.get("upstream_probe_interval_s", 5.0)),
         )
 
     def as_dict(self) -> dict[str, Any]:

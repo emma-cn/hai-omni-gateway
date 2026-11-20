@@ -185,7 +185,7 @@ def summarize(entries: list[dict[str, Any]]) -> dict[str, Any]:
         return out
 
     out: dict[str, Any] = {"count": len(entries)}
-    for seg in ("queue_wait_ms", "wake_ms", "gen_ms", "total_ms"):
+    for seg in ("queue_wait_ms", "wake_ms", "upstream_wait_ms", "gen_ms", "total_ms"):
         vals = col(seg)
         out[seg] = {
             "p50": _pct(vals, 50),

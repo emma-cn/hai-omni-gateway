@@ -25,6 +25,36 @@
   GitHub 上的 `v0.1.2`（bump 提交）内容不同却同号，即"同号不同内容"。
 - 已发布各号的内容：`v0.1.0 = 6f4131c7`、`v0.1.1 = a8bad3f5`、`v0.1.2 = d534ebca`、`v0.1.3 = 07a03783`。
 
+## [0.1.14] - 2026-11-20
+
+### Fixed
+- **A-602 归因失效（产品实测抓出）**：原来只有一个 `gen_ms`，「发出请求 → 首字节」的等待
+  全被贴成"生成"。8 并发长文本时 `gen p95 = 44.3s` 而 `queue_wait` 最大 0.02ms，
+  p95/p50 差 62 倍 —— 等于没有归因。
+  现在拆成四段，严格不重叠：`queue_wait_ms`（网关等名额）→ `wake_ms`（换台搬显存）
+  → **`upstream_wait_ms`（首字节之前，含 vLLM 内部 max_num_seqs 排队与抢占）**
+  → `gen_ms`（首字节之后）
+- 账本增加 `upstream_waiting` / `upstream_running`：请求发出时上游自己的队列深度
+
+### Added
+- **上游排队探针**：每 5s 抓一次 vLLM 的 `/metrics`（`num_requests_waiting/running`），
+  结果进 `/metrics`（`omni_upstream_waiting` / `omni_upstream_running`）与账本。
+  这是「多少时间是等 max_num_seqs」唯一可证的数据源，不必让后端改代码
+- 间隔可配 `upstream_probe_interval_s`（0=关）
+
+### Changed
+- **`GET /v1/audio/voices` 不再强制 model**（发现类端点）：不带 model 时汇总全部语音模型的
+  音色，每条标 `model`，并回 `sources` 说明哪个模型没取到（后端睡着/挂了不整体失败）。
+  "model 必填"是防**生成**时静默落到别的模型，不该管到列表接口。
+
+### 实测（13.1，VoxCPM2，修复后同一手法）
+```
+8 并发短文本 : total p95 = 0.99s   (upstream_wait p95=0.99s, gen p95=1.4ms)
+8 并发长文本 : total p95 = 13.87s  (upstream_wait p95=13.81s, gen p95=62.8ms)
+```
+结论：等待**全在上游**，网关侧 queue_wait/wake 都是 0。`gen_ms` 现在是首字节后的时间，
+对非流式音频只有毫秒级 —— 说明抖动与网关无关。
+
 ## [0.1.13] - 2026-11-20
 
 ### Fixed

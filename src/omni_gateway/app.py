@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import asyncio
 import os
 import time
 import uuid
@@ -46,7 +47,7 @@ from .scheduler import (
     WakeFailed,
     WakeOOM,
 )
-from .upstream import OmniClient
+from .upstream import OmniClient, scrape_vllm_queue
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +128,21 @@ def create_app(config_path: str) -> FastAPI:
     omni = OmniClient(client)
     sched = Scheduler(cfg, omni)
 
+    # 上游排队深度探针：每 5s 抓一次 vLLM 的 num_requests_waiting/running。
+    # 没有它，「44 秒里多少是等 max_num_seqs」就只能靠推理（A-602 的归因要求可证）。
+    upstream_queue: dict[str, dict[str, float]] = {}
+
+    async def _probe_upstream() -> None:
+        interval = cfg.upstream_probe_interval_s
+        if interval <= 0:
+            return
+        while True:
+            for name, m in cfg.models.items():
+                sample = await scrape_vllm_queue(client, m.base_url)
+                if sample:
+                    upstream_queue[name] = sample
+            await asyncio.sleep(interval)
+
     # 请求账本（A-601/602）：lifespan 里启停，这里先建实例
     led: Ledger | None = (
         Ledger(
@@ -144,6 +160,7 @@ def create_app(config_path: str) -> FastAPI:
         sched.start()
         if led is not None:
             led.start()     # 后台 writer task：请求路径只入队，不落盘阻塞
+        probe_task = asyncio.create_task(_probe_upstream())
         caps = sorted({c for m in cfg.models.values() for c in m.capabilities})
         log.info("hai-omni-gateway %s 启动：%d 张卡 / %d 个模型 / 能力 %s",
                  __version__, len(cfg.cards), len(cfg.models), caps)
@@ -153,6 +170,7 @@ def create_app(config_path: str) -> FastAPI:
         try:
             yield
         finally:
+            probe_task.cancel()
             if led is not None:
                 await led.stop()   # 把缓冲里残留的行刷盘，别丢最后一批
             await sched.stop()
@@ -219,6 +237,11 @@ def create_app(config_path: str) -> FastAPI:
                 # 三段耗时（A-602）：任何一段异常都独立可见，便于归因 p95
                 "queue_wait_ms": round(stats.get("queue_wait_ms", 0.0), 3),
                 "wake_ms": round(stats.get("wake_ms", 0.0), 3),
+                # 上游排队/抢占等待（首字节之前），与 gen_ms 严格不重叠
+                "upstream_wait_ms": round(stats.get("upstream_wait_ms", 0.0), 3),
+                # 请求发出时上游自己的队列深度（可能滞后 ≤5s，够用于归因）
+                "upstream_waiting": (upstream_queue.get(model) or {}).get("waiting"),
+                "upstream_running": (upstream_queue.get(model) or {}).get("running"),
                 "gen_ms": round(stats.get("gen_ms", 0.0), 3),
                 "total_ms": round((time.monotonic() - t_req) * 1000.0, 3),
                 "bytes_out": stats.get("bytes_out", 0),
@@ -321,10 +344,54 @@ def create_app(config_path: str) -> FastAPI:
         return {"object": "list", "data": data}
 
     # ------------------------------------------------------------ 透传
+    async def _voices_all(request: Request) -> Response:
+        """不带 model 的 `GET /v1/audio/voices`：汇总全部语音模型的音色。
+
+        单模型失败不影响整体：某后端睡着/挂了，就在结果里标 `error`，
+        而不是让整次发现请求 500——发现接口的价值在于"尽量告诉我有什么"。
+        """
+        merged: list[dict[str, Any]] = []
+        sources: dict[str, Any] = {}
+        for name, m in cfg.models.items():
+            if "speech" not in m.capabilities:
+                continue
+            try:
+                await sched.acquire(name)
+            except Exception as e:  # noqa: BLE001 - 发现接口要把失败降级成字段
+                sources[name] = {"ok": False, "error": type(e).__name__}
+                continue
+            try:
+                upstream = await client.get(m.base_url + "/v1/audio/voices")
+                if upstream.status_code != 200:
+                    sources[name] = {"ok": False, "error": f"http={upstream.status_code}"}
+                    continue
+                payload = upstream.json()
+                voices = payload.get("voices") or payload.get("data") or []
+                for v in voices:
+                    item = dict(v) if isinstance(v, dict) else {"name": str(v)}
+                    item.setdefault("model", name)
+                    merged.append(item)
+                sources[name] = {"ok": True, "count": len(voices)}
+            except Exception as e:  # noqa: BLE001
+                sources[name] = {"ok": False, "error": type(e).__name__}
+            finally:
+                await sched.release(name)
+        return JSONResponse(
+            {
+                "object": "list",
+                "data": merged,
+                "voices": merged,          # 兼容只读 voices 字段的客户端
+                # 哪些模型的音色没取到：客户端可据此判断"少了"还是"真没有"
+                "sources": sources,
+                "models_queried": list(sources),
+            }
+        )
+
     async def _passthrough(request: Request, model: str, path: str) -> Response:
         m = cfg.models[model]
         t_req = time.monotonic()
-        stats: dict[str, Any] = {"queue_wait_ms": 0.0, "wake_ms": 0.0, "gen_ms": 0.0,
+        stats: dict[str, Any] = {"queue_wait_ms": 0.0, "wake_ms": 0.0,
+                                 "upstream_wait_ms": 0.0, "gen_ms": 0.0,
                                  "bytes_out": 0, "status": 0, "error": None}
 
         def _fail(
@@ -404,14 +471,26 @@ def create_app(config_path: str) -> FastAPI:
                 await _release()
 
             async def body_iter() -> AsyncIterator[bytes]:
+                t_first: float | None = None
                 try:
                     async for chunk in upstream.aiter_raw():
+                        if t_first is None:
+                            t_first = time.monotonic()
+                            # 首字节之前的时间**不是生成**：那是上游（vLLM 的
+                            # max_num_seqs 队列 / 并发抢占）在等。把它算进 gen_ms
+                            # 会让 8 并发下的 p95 变成 p50 的 62 倍，归因彻底失效。
+                            stats["upstream_wait_ms"] = (t_first - t_gen) * 1000.0
                         stats["bytes_out"] = stats.get("bytes_out", 0) + len(chunk)
                         yield chunk
                 finally:
-                    # 流结束（或客户端断开）才算真正的"生成耗时"：
-                    # 音频是边算边发的，首字节时间不代表这条请求结束了。
-                    stats["gen_ms"] = (time.monotonic() - t_gen) * 1000.0
+                    # gen_ms = 首字节之后的时间（真正的"在算"）；
+                    # 没收到任何字节时退化为全程，避免把失败请求记成"0 耗时"。
+                    t_end = time.monotonic()
+                    if t_first is None:
+                        stats["upstream_wait_ms"] = (t_end - t_gen) * 1000.0
+                        stats["gen_ms"] = 0.0
+                    else:
+                        stats["gen_ms"] = (t_end - t_first) * 1000.0
                     await upstream.aclose()
                     await _release()
                     _record_request(request, model, path, stats, t_req)
@@ -469,6 +548,12 @@ def create_app(config_path: str) -> FastAPI:
         raw = await request.body()
         t_dispatch = time.monotonic()
         model = _resolve_model(request, raw)
+
+        # 发现类端点不需要 model：不带就返回全部模型的音色（每条标 model）。
+        # "model 必填"是为了防止**生成**时静默落到别的模型上；列表接口没有这个问题，
+        # 强制必填只会让客户端为了列一次音色先去查 /v1/models。
+        if not model and path == "/v1/audio/voices" and request.method == "GET":
+            return await _voices_all(request)
 
         def _reject(status: int, message: str, code: str, **kw: Any) -> Response:
             """在透传层之前就被拒的请求也要进账本（缺 model / 未知模型 / 能力不符）。"""
@@ -582,6 +667,28 @@ def create_app(config_path: str) -> FastAPI:
         for name in cfg.models:
             lines.append(f'omni_inflight{{model="{name}"}} {sched.card_of(name).inflight(name)}')
 
+        if upstream_queue:
+            lines += [
+                "# HELP omni_upstream_waiting 上游 vLLM 队列中等待调度的请求数（每 5s 采样）",
+                "# TYPE omni_upstream_waiting gauge",
+            ]
+            for name in cfg.models:
+                sample = upstream_queue.get(name) or {}
+                if sample:
+                    lines.append(
+                        f'omni_upstream_waiting{{model="{name}"}} {sample.get("waiting", 0)}'
+                    )
+            lines += [
+                "# HELP omni_upstream_running 上游正在运行的请求数",
+                "# TYPE omni_upstream_running gauge",
+            ]
+            for name in cfg.models:
+                sample = upstream_queue.get(name) or {}
+                if sample:
+                    lines.append(
+                        f'omni_upstream_running{{model="{name}"}} {sample.get("running", 0)}'
+                    )
+
         if led is None:
             lines.append("# 账本关闭：omni_ledger_* 与 omni_segment_* 不可得")
         else:
@@ -602,7 +709,7 @@ def create_app(config_path: str) -> FastAPI:
                 "# HELP omni_segment_ms 三段耗时分位数（最近窗口，非全量）",
                 "# TYPE omni_segment_ms gauge",
             ]
-            for seg in ("queue_wait_ms", "wake_ms", "gen_ms", "total_ms"):
+            for seg in ("queue_wait_ms", "wake_ms", "upstream_wait_ms", "gen_ms", "total_ms"):
                 for q, key in (("0.5", "p50"), ("0.95", "p95")):
                     v = summary.get(seg, {}).get(key)
                     if v is not None:
