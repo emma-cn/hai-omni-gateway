@@ -25,6 +25,30 @@
   GitHub 上的 `v0.1.2`（bump 提交）内容不同却同号，即"同号不同内容"。
 - 已发布各号的内容：`v0.1.0 = 6f4131c7`、`v0.1.1 = a8bad3f5`、`v0.1.2 = d534ebca`、`v0.1.3 = 07a03783`。
 
+## [0.1.13] - 2026-11-20
+
+### Fixed
+- **#13 管理页在鉴权上线后不可用**：`/ui` 页面壳改为公开（本身不含任何数据），
+  页头加 Admin token 输入框、测试面板加可选 API key，凭据存 localStorage，
+  所有请求带 `Authorization: Bearer`；401/403 时输入框高亮并提示原因
+- **废弃 `?token=`**：URL 里的 token 会进访问日志、浏览器历史、Referer，
+  一次误发等于泄露。凭据只走 header。
+
+### Added
+- **`GET /metrics`（A-1104，Prometheus 文本格式）**：`omni_up` / `omni_models{model,card}` /
+  `omni_inflight{model}` / `omni_ledger_written_total` / `omni_ledger_dropped_total` /
+  `omni_ledger_disabled` / `omni_segment_ms{segment,quantile}`（p50/p95，最近窗口）
+- **凭据口径统一**：`/admin/*` 与 `/metrics` 都要 admin token；
+  `/ui` 只有壳，公开。文档写清，避免"一个要一个不要"
+
+### 关于 #13 报告里的一处矛盾（需产品/测试确认）
+原报告要求「`/ui` 保持 401」+「页面里加 token 输入框」。这两条无法同时成立——
+401 的页面浏览器渲染不出来，输入框永远没人能填。本版按「壳公开、数据面全要 token」实现，
+`/ui` 无 token 现在是 **200**（页面里显示"需要 Admin token"并高亮输入框）。
+
+### 实测
+- pytest：118 passed, 4 xfailed（新增 4 条：壳公开/HTML 含凭据支持/admin 与 metrics 收 token/query token 被拒）
+
 ## [0.1.12] - 2026-11-20
 
 ### Added

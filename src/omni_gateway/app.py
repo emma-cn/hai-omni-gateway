@@ -242,14 +242,9 @@ def create_app(config_path: str) -> FastAPI:
         )
         request.state.request_id = rid
         peer = request.client.host if request.client else None
-        # 浏览器里打开 /ui 时没法加 Authorization 头，允许 ?token= 传 admin token
-        # （只对运维面生效；业务面仍要求 header，避免 token 出现在 URL/日志里）
+        # 不再支持 ?token=：URL 会进访问日志、浏览器历史、Referer。
+        # /ui 页面把 token 存在 localStorage 并放进 Authorization 头（见 static/ui.html）。
         headers = request.headers
-        if request.url.path.startswith(("/admin", "/ui", "/metrics")):
-            qtok = request.query_params.get("token")
-            if qtok:
-                headers = dict(request.headers)
-                headers["authorization"] = f"Bearer {qtok}"
         try:
             ident = authr.authenticate(request.url.path, peer, headers)
         except AuthError as e:
@@ -559,6 +554,60 @@ def create_app(config_path: str) -> FastAPI:
             "docs": "/docs",
             "models": sorted(cfg.models),
         })
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        """Prometheus 文本格式（A-1104）。
+
+        凭据口径与 /admin/* 一致：**要 admin token**（`Authorization: Bearer <token>`）。
+        为什么不放开只读：这里会暴露模型名、卡位与负载，等于把内部拓扑公开；
+        而 Prometheus 的 scrape 配置本来就支持 `authorization.credentials`，成本很低。
+
+        只输出**真的在发生**的数字：卡状态、在飞数、账本写入/丢弃、三段耗时分位数。
+        没有任何"看起来专业但没人算"的指标。
+        """
+        lines: list[str] = [
+            "# HELP omni_up 进程存活（恒 1，抓不到就是抓不到）",
+            "# TYPE omni_up gauge",
+            "omni_up 1",
+            "# HELP omni_models 模型状态：1=醒着 0=睡着",
+            "# TYPE omni_models gauge",
+        ]
+        for name in cfg.models:
+            card = sched.card_of(name)
+            awake = 1 if card.state(name) == "awake" else 0
+            lines.append(f'omni_models{{model="{name}",card="{cfg.models[name].card}"}} {awake}')
+        lines.append("# HELP omni_inflight 在飞请求数")
+        lines.append("# TYPE omni_inflight gauge")
+        for name in cfg.models:
+            lines.append(f'omni_inflight{{model="{name}"}} {sched.card_of(name).inflight(name)}')
+
+        if led is None:
+            lines.append("# 账本关闭：omni_ledger_* 与 omni_segment_* 不可得")
+        else:
+            st = led.stats()
+            lines += [
+                "# HELP omni_ledger_written_total 已落盘行数",
+                "# TYPE omni_ledger_written_total counter",
+                f"omni_ledger_written_total {st['written']}",
+                "# HELP omni_ledger_dropped_total 因队列满丢弃的行数（>0 说明记账跟不上）",
+                "# TYPE omni_ledger_dropped_total counter",
+                f"omni_ledger_dropped_total {st['dropped']}",
+                "# HELP omni_ledger_disabled 账本是否因不可写而自我禁用",
+                "# TYPE omni_ledger_disabled gauge",
+                f"omni_ledger_disabled {1 if st['disabled'] else 0}",
+            ]
+            summary = summarize(led.recent(500))
+            lines += [
+                "# HELP omni_segment_ms 三段耗时分位数（最近窗口，非全量）",
+                "# TYPE omni_segment_ms gauge",
+            ]
+            for seg in ("queue_wait_ms", "wake_ms", "gen_ms", "total_ms"):
+                for q, key in (("0.5", "p50"), ("0.95", "p95")):
+                    v = summary.get(seg, {}).get(key)
+                    if v is not None:
+                        lines.append(f'omni_segment_ms{{segment="{seg}",quantile="{q}"}} {v}')
+        return Response("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
     @app.get("/admin/ledger")
     async def admin_ledger(request: Request, limit: int = 100) -> JSONResponse:

@@ -63,6 +63,9 @@
   .split{display:grid;grid-template-columns:1.15fr .85fr;gap:14px;align-items:start}
   @media(max-width:900px){.split{grid-template-columns:1fr}}
   .pill{font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:1px 7px;margin-right:4px}
+  /* 凭据缺失/失效时高亮输入框：不要让用户对着"连接失败"猜原因 */
+  input.bad{border-color:var(--err)!important;box-shadow:0 0 0 2px #f8514933}
+  .hint{font-size:12px;color:var(--warn)}
 </style>
 </head>
 <body>
@@ -72,6 +75,9 @@
   <span id="conn" class="badge">连接中</span>
   <span class="badge" id="autoref">自动刷新 2s</span>
   <div style="margin-left:auto" class="row">
+    <input id="adm" type="password" placeholder="Admin token（存本机 localStorage）"
+           style="width:250px" autocomplete="off" spellcheck="false" />
+    <button class="ghost" onclick="saveToken()">保存</button>
     <button class="ghost" onclick="load()">刷新</button>
   </div>
 </header>
@@ -105,6 +111,10 @@
           <input type="file" id="tFile" accept="audio/*" />
           <input id="tRefPath" placeholder="file:///media/xxx.wav（可留空）" />
         </div>
+        <div class="field">
+          <label>API key（可选：生产上业务面按 key 鉴权，admin token 通常不能调 /v1）</label>
+          <input id="apiKey" type="password" placeholder="sk-…（存本机 localStorage）" autocomplete="off" />
+        </div>
         <div class="row">
           <button class="primary" id="tGo" onclick="synthesize()">合成</button>
           <span class="muted" id="tMsg"></span>
@@ -125,6 +135,61 @@
 <script>
 let STATE = {cards: [], models: []};
 
+// ---------------------------------------------------------------- 凭据
+// 为什么用 localStorage 而不是 ?token=：
+//   URL 里的 token 会进服务器访问日志、浏览器历史、Referer 头，
+//   一次误发就等于泄露。localStorage 只留在本机浏览器里。
+// 为什么不要求每次输一遍：token 是长期凭据，控制台是内部页面，反复输入只会催生"存文本里"。
+const LS_ADM = 'omni.admin_token';
+const LS_KEY = 'omni.api_key';
+
+function getTok(k){ try{ return localStorage.getItem(k) || ''; }catch(e){ return ''; } }
+function setTok(k, v){ try{ v ? localStorage.setItem(k, v) : localStorage.removeItem(k); }catch(e){} }
+
+function saveToken(){
+  const adm = document.getElementById('adm');
+  setTok(LS_ADM, adm.value.trim());
+  adm.classList.remove('bad');
+  setHint('');
+  load();
+}
+
+function setHint(msg){
+  const el = document.getElementById('autoref');
+  if(msg){ el.textContent = msg; el.className = 'badge err'; }
+  else { el.textContent = '自动刷新 2s'; el.className = 'badge'; }
+}
+
+/** 统一带凭据的 fetch。
+ *  - 运维面（/admin/*、/metrics）用 admin token
+ *  - 业务面（/v1/audio/*）用 API key；没填 API key 就退回 admin token，
+ *    因为单机 dev 常把同一串既当 admin 又当 key（生产要分开）
+ *  401/403 时高亮输入框——别让用户对着"连接失败"猜是网络还是凭据。
+ */
+async function apiFetch(path, opts){
+  opts = opts || {};
+  const isOps = path.startsWith('/admin') || path.startsWith('/metrics');
+  const tok = isOps ? getTok(LS_ADM) : (getTok(LS_KEY) || getTok(LS_ADM));
+  const headers = Object.assign({}, opts.headers || {});
+  if(tok) headers['Authorization'] = 'Bearer ' + tok;
+  const r = await fetch(path, Object.assign({}, opts, {headers}));
+  if(r.status === 401 || r.status === 403){
+    const el = document.getElementById('adm');
+    if(el) el.classList.add('bad');
+    setHint(r.status === 401 ? '需要 Admin token（点右上角填写）' : '凭据权限不足');
+  }
+  return r;
+}
+
+function initTokenInput(){
+  const el = document.getElementById('adm');
+  el.value = getTok(LS_ADM);
+  el.addEventListener('keydown', e => { if(e.key === 'Enter') saveToken(); });
+  const k = document.getElementById('apiKey');
+  k.value = getTok(LS_KEY);
+  k.addEventListener('change', () => setTok(LS_KEY, k.value.trim()));
+}
+
 function fmtTime(ts){
   const d = new Date(ts*1000);
   return d.toTimeString().slice(0,8);
@@ -133,7 +198,7 @@ function esc(s){return (s??'').toString().replace(/[&<>"']/g, c=>({'&':'&amp;','
 
 async function load(){
   try{
-    const r = await fetch('/admin/state', {cache:'no-store'});
+    const r = await apiFetch('/admin/state', {cache:'no-store'});
     if(!r.ok) throw new Error('HTTP '+r.status);
     const s = await r.json();
     STATE = s;
@@ -201,7 +266,7 @@ function render(s){
 async function ctl(model, action, btn){
   btn.disabled = true;
   try{
-    const r = await fetch('/admin/'+action, {
+    const r = await apiFetch('/admin/'+action, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({model})
     });
@@ -236,7 +301,7 @@ async function synthesize(){
       payload.ref_audio = refPath;
     }
 
-    const r = await fetch('/v1/audio/speech', {
+    const r = await apiFetch('/v1/audio/speech', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
     });
     const ms = Math.round(performance.now()-t0);
@@ -262,6 +327,7 @@ async function synthesize(){
   }
 }
 
+initTokenInput();
 load();
 setInterval(load, 2000);
 </script>

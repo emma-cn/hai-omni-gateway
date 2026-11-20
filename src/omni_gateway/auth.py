@@ -29,10 +29,20 @@ from dataclasses import dataclass, field
 from .config import KeyConfig
 
 # 公开路径：健康检查与文档。这些不带任何业务信息，探活用。
-PUBLIC_PATHS = frozenset({"/healthz", "/docs", "/openapi.json", "/redoc"})
+PUBLIC_PATHS = frozenset({
+    "/healthz",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    # /ui 是**页面壳**：只有一个 token 输入框和几处 fetch，本身不含任何数据。
+    # 如果把它一起挡住，浏览器根本打不开页面，"在页面里填 token"就无从谈起
+    # （issue #13 的原始矛盾）。所以壳公开、数据面全部要 token。
+    "/ui",
+})
 
 # 运维面：需要 admin token（或 loopback）
-ADMIN_PREFIXES = ("/admin", "/ui", "/metrics")
+# 运维面：数据接口 + 指标。`/ui` 不在其中（见 PUBLIC_PATHS 的说明）。
+ADMIN_PREFIXES = ("/admin", "/metrics")
 
 
 class AuthError(Exception):
