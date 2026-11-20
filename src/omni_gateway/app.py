@@ -20,6 +20,7 @@ import contextlib
 import json
 import logging
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -31,6 +32,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__, catalog
+from .ledger import Ledger, summarize
 from .auth import Authenticator, AuthError
 from .config import GatewayConfig
 from .scheduler import (
@@ -125,9 +127,23 @@ def create_app(config_path: str) -> FastAPI:
     omni = OmniClient(client)
     sched = Scheduler(cfg, omni)
 
+    # 请求账本（A-601/602）：lifespan 里启停，这里先建实例
+    led: Ledger | None = (
+        Ledger(
+            cfg.ledger.path,
+            max_bytes=cfg.ledger.max_bytes,
+            keep=cfg.ledger.keep,
+            ring=cfg.ledger.ring,
+        )
+        if cfg.ledger.enabled
+        else None
+    )
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         sched.start()
+        if led is not None:
+            led.start()     # 后台 writer task：请求路径只入队，不落盘阻塞
         caps = sorted({c for m in cfg.models.values() for c in m.capabilities})
         log.info("hai-omni-gateway %s 启动：%d 张卡 / %d 个模型 / 能力 %s",
                  __version__, len(cfg.cards), len(cfg.models), caps)
@@ -137,6 +153,8 @@ def create_app(config_path: str) -> FastAPI:
         try:
             yield
         finally:
+            if led is not None:
+                await led.stop()   # 把缓冲里残留的行刷盘，别丢最后一批
             await sched.stop()
             await client.aclose()
 
@@ -178,6 +196,34 @@ def create_app(config_path: str) -> FastAPI:
             },
             status_code=exc.status_code,
             headers={"x-request-id": rid},
+        )
+
+    # ---------------------------------------------------------------- 请求账本
+    def _record_request(
+        request: Request, model: str, path: str, stats: dict[str, Any], t_req: float
+    ) -> None:
+        """一条请求一行日志。字段名稳定，便于外部直接 `jq` 出三段分布。"""
+        if led is None:
+            return
+        ident = getattr(request.state, "identity", None)
+        led.record(
+            {
+                "request_id": getattr(request.state, "request_id", ""),
+                "key": getattr(ident, "name", "") if ident else "",
+                "client": request.client.host if request.client else "",
+                "method": request.method,
+                "path": path,
+                "model": model,
+                "status": stats.get("status") or 0,
+                "error": stats.get("error") or None,
+                # 三段耗时（A-602）：任何一段异常都独立可见，便于归因 p95
+                "queue_wait_ms": round(stats.get("queue_wait_ms", 0.0), 3),
+                "wake_ms": round(stats.get("wake_ms", 0.0), 3),
+                "gen_ms": round(stats.get("gen_ms", 0.0), 3),
+                "total_ms": round((time.monotonic() - t_req) * 1000.0, 3),
+                "bytes_out": stats.get("bytes_out", 0),
+                "switches": stats.get("switches") or [],
+            }
         )
 
     @app.middleware("http")
@@ -282,42 +328,55 @@ def create_app(config_path: str) -> FastAPI:
     # ------------------------------------------------------------ 透传
     async def _passthrough(request: Request, model: str, path: str) -> Response:
         m = cfg.models[model]
+        t_req = time.monotonic()
+        stats: dict[str, Any] = {"queue_wait_ms": 0.0, "wake_ms": 0.0, "gen_ms": 0.0,
+                                 "bytes_out": 0, "status": 0, "error": None}
+
+        def _fail(
+            status: int, message: str, code: str, retry_after: int = 0, reason: str = ""
+        ) -> Response:
+            """失败也要进账本：没有失败样本，p95 就只能算成功请求，归因会偏。"""
+            stats["status"] = status
+            stats["error"] = code
+            _record_request(request, model, path, stats, t_req)
+            return _error(status, message, code, retry_after=retry_after, reason=reason)
+
         try:
-            await sched.acquire(model)
+            stats["queue_wait_ms"], stats["wake_ms"] = await sched.acquire(model)
         except WakeFailed as e:
             log.warning("唤醒 %s 失败: %s", model, e)
-            return _error(503, f"模型 {model} 唤醒失败，请稍后重试", "wake_failed", retry_after=10)
+            return _fail(503, f"模型 {model} 唤醒失败，请稍后重试", "wake_failed", retry_after=10)
         except BackendUnavailable as e:
             # 后端进程不在：重试唤醒毫无意义。502 让调用方立刻失败，
             # 且避免把客户端拖到超时。冷却期由 scheduler 负责。
             log.error("后端不可用（不重试）: %s", e)
-            return _error(502, str(e), "backend_unavailable", retry_after=15)
+            return _fail(502, str(e), "backend_unavailable", retry_after=15)
         except WakeOOM as e:
             log.warning("唤醒时显存不足: %s", e)
-            return _error(503, str(e), "wake_oom", retry_after=10)
+            return _fail(503, str(e), "wake_oom", retry_after=10)
         except BadRequestRejected as e:
             # 上游拒参数：不重试、不计熔断，原样告诉调用方是它自己发错了
             log.warning("上游拒绝参数: %s", e)
-            return _error(400, str(e), "bad_request")
+            return _fail(400, str(e), "bad_request")
         except QueueFull as e:
             # 队列满：快速失败 + 告诉客户端多久再来，比让它无限等更有用
             log.warning("队列已满，拒绝排队: %s", e)
             # 429 的 code 统一用 OpenAI 的 rate_limit_exceeded（客户端按 code 分支），
             # 我们自己的"队列满"细分放进 reason 字段。
-            return _error(429, str(e), "rate_limit_exceeded", retry_after=2, reason="queue_full")
+            return _fail(429, str(e), "rate_limit_exceeded", retry_after=2, reason="queue_full")
         except RequestTimeout as e:
             # 排队超时：请求根本没发到上游，客户端可安全重试
             log.warning("排队超时: %s", e)
-            return _error(503, str(e), "request_timeout", retry_after=5)
+            return _fail(503, str(e), "request_timeout", retry_after=5)
         except SleepFailed as e:
             # 旧模型睡不下去时绝不能继续唤醒：硬换必 OOM，OOM 会打死后端进程。
             log.error("睡眠失败，已中止换台: %s", e)
-            return _error(503, f"显卡释放失败，已中止换台：{e}", "sleep_failed", retry_after=15)
+            return _fail(503, f"显卡释放失败，已中止换台：{e}", "sleep_failed", retry_after=15)
         except DrainTimeout as e:
             # 上游规则：暂停没完成不许 sleep。这里拒绝换台而不是硬切，
             # 让客户端拿 503 重试（Retry-After 用一个 drain 周期的量级）。
             log.warning("拒绝换台（drain 未完成）: %s", e)
-            return _error(503, f"显卡正忙，换台被拒绝：{e}", "drain_timeout", retry_after=5)
+            return _fail(503, f"显卡正忙，换台被拒绝：{e}", "drain_timeout", retry_after=5)
 
         released = False
 
@@ -334,6 +393,8 @@ def create_app(config_path: str) -> FastAPI:
             # 全局 read=1800s 是"永不超时"的另一种说法，长任务也会因此挂到客户端先断。
             # 连接超时单独给 5s —— 连不上应当快速报错，而不是占着名额干等。
             req_timeout = httpx.Timeout(m.request_timeout_s, connect=5.0)
+            t_gen = time.monotonic()
+            stats["status"] = 0  # 待上游返回后填
             upstream = await client.send(
                 client.build_request(
                     request.method, m.base_url + path, content=body, headers=headers, timeout=req_timeout
@@ -343,16 +404,22 @@ def create_app(config_path: str) -> FastAPI:
             resp_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in HOP_BY_HOP}
             # 异步任务接口（视频）：POST 只返回 id，产物在别处取——
             # "这条请求在飞"不代表模型忙，立即释放占位，由 lease 负责不让它被挤掉。
+            stats["status"] = upstream.status_code
             if path.startswith(ASYNC_PREFIXES) and request.method == "POST":
                 await _release()
 
             async def body_iter() -> AsyncIterator[bytes]:
                 try:
                     async for chunk in upstream.aiter_raw():
+                        stats["bytes_out"] = stats.get("bytes_out", 0) + len(chunk)
                         yield chunk
                 finally:
+                    # 流结束（或客户端断开）才算真正的"生成耗时"：
+                    # 音频是边算边发的，首字节时间不代表这条请求结束了。
+                    stats["gen_ms"] = (time.monotonic() - t_gen) * 1000.0
                     await upstream.aclose()
                     await _release()
+                    _record_request(request, model, path, stats, t_req)
 
             return StreamingResponse(
                 body_iter(),
@@ -363,7 +430,7 @@ def create_app(config_path: str) -> FastAPI:
         except Exception as e:
             await _release()
             log.exception("转发失败 model=%s path=%s", model, path)
-            return _error(502, f"上游转发失败: {type(e).__name__}: {e}", "upstream_error")
+            return _fail(502, f"上游转发失败: {type(e).__name__}: {e}", "upstream_error")
 
     def _resolve_model(request: Request, raw: bytes) -> str | None:
         """从 query / JSON / 表单 / multipart 里取 model。
@@ -405,21 +472,34 @@ def create_app(config_path: str) -> FastAPI:
         path = request.url.path
         cap = _capability_for(request.method, path)
         raw = await request.body()
+        t_dispatch = time.monotonic()
         model = _resolve_model(request, raw)
+
+        def _reject(status: int, message: str, code: str, **kw: Any) -> Response:
+            """在透传层之前就被拒的请求也要进账本（缺 model / 未知模型 / 能力不符）。"""
+            _record_request(
+                request,
+                model or "",
+                path,
+                {"queue_wait_ms": 0.0, "wake_ms": 0.0, "gen_ms": 0.0,
+                 "status": status, "error": code},
+                t_dispatch,
+            )
+            return _error(status, message, code, **kw)
         if not model:
             # 开放产品**不猜**候选：候选数一变，缺 model 的请求就会静默落到别的模型上。
             # 正确行为是明确报错并列出可用模型。
             candidates = [n for n, m in cfg.models.items() if not cap or cap in m.capabilities]
-            return _error(
+            return _reject(
                 400,
                 f"缺少 model 字段。可用模型：{candidates}",
                 "missing_model",
                 param="model",
             )
         if model not in cfg.models:
-            return _error(404, f"未知模型 {model}", "model_not_found", param="model")
+            return _reject(404, f"未知模型 {model}", "model_not_found", param="model")
         if cap and cap not in cfg.models[model].capabilities:
-            return _error(
+            return _reject(
                 400,
                 f"模型 {model} 不支持该接口：需要能力 {cap}，它声明的是 {cfg.models[model].capabilities}",
                 "capability_unsupported",
@@ -430,7 +510,7 @@ def create_app(config_path: str) -> FastAPI:
         ident = getattr(request.state, "identity", None)
         if ident is not None:
             if not ident.allows_model(model):
-                return _error(
+                return _reject(
                     403,
                     f"该 API key（{ident.name}）无权调用模型 {model}",
                     "forbidden",
@@ -479,6 +559,26 @@ def create_app(config_path: str) -> FastAPI:
             "docs": "/docs",
             "models": sorted(cfg.models),
         })
+
+    @app.get("/admin/ledger")
+    async def admin_ledger(request: Request, limit: int = 100) -> JSONResponse:
+        """账本读数：最近 N 条 + 三段耗时聚合。
+
+        A-601/602 的可验证面：`segments` 里三段分开给 p50/p95，
+        这就是"p95 归因"的最小数据集（不用把 JSONL 拉回本地算）。
+        """
+        # 鉴权在中间件里统一做（/admin/* 需 admin token），这里不重复判断
+        if led is None:
+            return JSONResponse({"enabled": False, "stats": None, "entries": [], "summary": {}})
+        entries = led.recent(limit)
+        return JSONResponse(
+            {
+                "enabled": True,
+                "stats": led.stats(),
+                "summary": summarize(entries),
+                "entries": entries,
+            }
+        )
 
     @app.get("/admin/state")
     async def admin_state() -> dict[str, Any]:

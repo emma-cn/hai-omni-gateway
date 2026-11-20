@@ -41,7 +41,11 @@ if [ -f "$ENVFILE" ]; then
   echo "   注入 env 文件: $ENVFILE"
 fi
 # shellcheck disable=SC2086
+# 账本目录挂到宿主机：能直接 jq / 轮转 / 备份，容器重建也不丢历史
+LEDGER_DIR="${OMNI_LEDGER_DIR:-$HOME/workspace/hound/hai-omni-gateway/logs}"
+mkdir -p "$LEDGER_DIR"
 docker run -d --name "$NAME" --restart unless-stopped --network host $ENVVOL \
+  -v "$LEDGER_DIR:/var/log/omni" \
   -e LOG_LEVEL="${LOG_LEVEL:-INFO}" -e OMNI_GATEWAY_CONFIG=/app/config/gateway.yaml \
   -v "$CONFIG:/app/config/gateway.yaml:ro" \
   "$IMAGE" >/dev/null

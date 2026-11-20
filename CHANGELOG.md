@@ -25,6 +25,39 @@
   GitHub 上的 `v0.1.2`（bump 提交）内容不同却同号，即"同号不同内容"。
 - 已发布各号的内容：`v0.1.0 = 6f4131c7`、`v0.1.1 = a8bad3f5`、`v0.1.2 = d534ebca`、`v0.1.3 = 07a03783`。
 
+## [0.1.12] - 2026-11-20
+
+### Added
+- **请求账本（A-601/602）**：每请求一行 JSONL（`ledger.path`，默认 `/var/log/omni/requests.jsonl`），
+  按大小轮转（`max_bytes` / `keep`）。字段：`request_id / key / model / path / status / error /
+  queue_wait_ms / wake_ms / gen_ms / total_ms / bytes_out`
+- **三段耗时分开记**：排队（等执行名额）/ 唤醒（换台+搬显存）/ 生成（模型在算），
+  合成一个数字时 p95 一抖就无法归因
+- `GET /admin/ledger?limit=N`：最近 N 条 + 三段 p50/p95/max 聚合（无需把 JSONL 拉回本地算）
+- 失败请求也进账本（含 `missing_model` / `model_not_found` / `capability_unsupported` / 403），
+  只统计成功请求的 p95 会系统性偏低
+- `deploy-dev.sh` 把账本目录挂到宿主机 `./logs`，容器重建不丢历史
+
+### Fixed
+- **`queue_wait_ms` 曾把唤醒时间算进去**（实测 1209.791 vs wake 1209.772，两段几乎相等，
+  归因完全失效）——排队计时在拿到执行名额时截止
+- **`admin_token_env` 是空挂配置**：鉴权只读 `cfg.admin_token`，env 注入的 token 一律 401。
+  改用 `resolved_admin_token()`；同时清掉 dev 配置里硬编码的 admin token（回滚用 `.bak-*`）
+- 账本初始化失败（如 `/var/log` 无权限）不再阻止服务启动：账本是观测设施，
+  为记日志而起不来服务比丢日志更糟
+
+### 实测（13.1 真机，VoxCPM2 + IndexTTS）
+```
+/models/VoxCPM2      200  q_wait=0.016  wake=1215.065  gen=709.023  total=1924.153   ← 冷启
+/models/VoxCPM2      200  q_wait=0.008  wake=   0.000  gen=326.588  total= 326.652   ← 稳态
+/models/IndexTTS-2.5 400  q_wait=0.011  wake=5801.590  gen=  1.523  total=5803.160   ← 换台
+(none)               400  q_wait=0.000  wake=   0.000  gen=  0.000  total=  0.021 missing_model
+聚合 count=6 dropped=0
+  queue_wait_ms p50=0.006  p95=0.011
+  wake_ms       p50=0.0    p95=5801.59
+  gen_ms        p50=263.3  p95=343.44
+```
+
 ## [0.1.11] - 2026-11-20
 
 ### Changed

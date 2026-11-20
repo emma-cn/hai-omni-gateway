@@ -167,12 +167,16 @@ class Authenticator:
         if is_admin_path:
             if loopback and getattr(self.cfg, "admin_loopback_bypass", False):
                 return Identity(name="admin-loopback", is_admin=True, is_loopback=True)
-            if not self.cfg.admin_token:
+            # 必须用 resolved_admin_token()：它会把 admin_token_env 指向的环境变量读进来。
+            # 直接读 self.cfg.admin_token 会让 `admin_token_env` 变成空挂配置
+            # （实测：env 里给了 OMNI_ADMIN_TOKEN，请求仍被判 401）。
+            admin_token = self.cfg.resolved_admin_token()
+            if not admin_token:
                 raise AuthError(
                     401, "unauthorized",
                     "运维面需要 admin token，但服务端未配置（服务以 fail-closed 方式拒绝）",
                 )
-            if presented and presented == self.cfg.admin_token:
+            if presented and presented == admin_token:
                 return Identity(name="admin-token", is_admin=True)
             raise AuthError(401, "unauthorized", "运维面需要 admin token")
 

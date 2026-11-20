@@ -151,7 +151,7 @@ class Card:
         return self._inflight.get(model, 0)
 
     # ---------------------------------------------------------------- 核心
-    async def acquire(self, model: str) -> float:
+    async def acquire(self, model: str) -> tuple[float, float]:
         """确保 model 醒着并占一个在飞名额，返回排队等待毫秒数。
 
         失败语义（都由 API 层翻译成 HTTP）：
@@ -209,6 +209,12 @@ class Card:
                 raise
 
         # 名额已占住，再确保模型醒着；醒不过来必须把名额退回，否则会永久泄漏
+        #
+        # ⚠ 分段口径：queue_wait_ms 在这里**截止**——只算"等名额"。
+        # 第一版直接把 acquire 总耗时当 queue_wait，结果唤醒 1.2s 全被算进排队，
+        # 两段数字一模一样，归因完全失效（实测 1209.791 vs 1209.772）。
+        queue_wait_ms = (time.monotonic() - t0) * 1000.0
+        wake_ms = 0.0
         try:
             async with self._lock:
                 if (
@@ -221,11 +227,17 @@ class Card:
                         f"{self._unavailable_until - time.monotonic():.0f}s）"
                     )
                 if self._awake != model:
+                    t_switch = time.monotonic()
                     await self._switch_to(model)
+                    wake_ms = (time.monotonic() - t_switch) * 1000.0
         except BaseException:
             await self._release_slot(model)
             raise
-        return (time.monotonic() - t0) * 1000.0
+        # 返回两段耗时，供账本分别记账（A-602）：
+        #   queue_wait_ms = 等执行名额（并发满/队首阻塞）
+        #   wake_ms       = 换台 + 唤醒（显存搬运）
+        # 合成一个数字的话，p95 抖动就无法归因到具体环节。
+        return queue_wait_ms, wake_ms
 
     async def _release_slot(self, model: str) -> None:
         cond = self._cond[model]
@@ -380,8 +392,9 @@ class Scheduler:
     def card_of(self, model: str) -> Card:
         return self.cards[self.cfg.models[model].card]
 
-    async def acquire(self, model: str) -> None:
-        await self.card_of(model).acquire(model)
+    async def acquire(self, model: str) -> tuple[float, float]:
+        """返回 (queue_wait_ms, wake_ms)，供账本分段记账。"""
+        return await self.card_of(model).acquire(model)
 
     async def release(self, model: str) -> None:
         await self.card_of(model).release(model)

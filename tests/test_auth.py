@@ -61,6 +61,24 @@ async def test_a101_external_request_with_valid_key_passes(gw):
         assert r2.status_code == 200
 
 
+async def test_admin_token_from_env_is_accepted(gw, monkeypatch):
+    """回归：admin_token_env 必须真的生效（env 给了 token，就不该再 401）。
+
+    踩过：auth 只读 cfg.admin_token，配置里的 `admin_token_env` 形同空挂，
+    env 注入的 token 全被判 401——"配置项不许空挂"这条规则指的就是这种。
+    """
+    from conftest import base_cfg
+
+    monkeypatch.setenv("OMNI_ADMIN_TOKEN", "env-adm-123")
+    raw = base_cfg()
+    raw["auth"] = dict(raw["auth"], admin_loopback_bypass=False)
+    async with gw(raw, client_host="203.0.113.7") as g:
+        r = await g.client.get("/admin/state", headers={"authorization": "Bearer env-adm-123"})
+        assert r.status_code == 200, "env 注入的 admin token 应被接受"
+        bad = await g.client.get("/admin/state", headers={"authorization": "Bearer wrong"})
+        assert bad.status_code == 401
+
+
 async def test_admin_surface_requires_token_even_on_loopback(gw):
     """运维面默认**不信任 loopback**：本机其它进程/SSH 隧道都能发 loopback 请求。
 

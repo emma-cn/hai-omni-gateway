@@ -218,6 +218,9 @@ def base_cfg() -> dict[str, Any]:
         # 测试用 loopback 监听：非 loopback + 无 key 会被 fail-closed 拒绝启动
         "listen": "127.0.0.1:8080",
         "queue_limit": 200,
+        # 账本默认关：多数用例与账本无关，且不该往 /var/log 写东西。
+        # 专门测账本的用例自己开一个 tmp 路径（tests/test_ledger.py）。
+        "ledger": {"enabled": False},
         # loopback 免 key；"testclient" 是 ASGI transport 的 peer 名
         "auth": {
             "loopback_bypass": True,

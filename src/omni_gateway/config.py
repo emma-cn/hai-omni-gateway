@@ -127,12 +127,24 @@ class AuthConfig:
 
 
 @dataclass
+class LedgerConfig:
+    """请求账本（A-601/602）。默认开启写 JSONL，因为"没有账本就无法归因 p95"。"""
+
+    enabled: bool = True
+    path: str = "/var/log/omni/requests.jsonl"
+    max_bytes: int = 64 * 1024 * 1024
+    keep: int = 5
+    ring: int = 500
+
+
+@dataclass
 class GatewayConfig:
     listen: str = "0.0.0.0:8080"
     cards: dict[str, CardConfig] = field(default_factory=dict)
     models: dict[str, ModelConfig] = field(default_factory=dict)
     queue_limit: int = 200         # 每个模型排队上限，超了直接 429
     auth: AuthConfig = field(default_factory=AuthConfig)
+    ledger: LedgerConfig = field(default_factory=LedgerConfig)
 
     @staticmethod
     def load(path: str | Path) -> GatewayConfig:
@@ -163,12 +175,21 @@ class GatewayConfig:
             loopback_peers=list(auth_raw.get("loopback_peers") or ["127.0.0.1", "::1", "localhost"]),
             keys=keys,
         )
+        led_raw = raw.get("ledger") or {}
+        ledger = LedgerConfig(
+            enabled=bool(led_raw.get("enabled", True)),
+            path=str(led_raw.get("path", "/var/log/omni/requests.jsonl")),
+            max_bytes=int(led_raw.get("max_bytes", 64 * 1024 * 1024)),
+            keep=int(led_raw.get("keep", 5)),
+            ring=int(led_raw.get("ring", 500)),
+        )
         return GatewayConfig(
             listen=raw.get("listen", "0.0.0.0:8080"),
             cards=cards,
             models=models,
             queue_limit=int(raw.get("queue_limit", 200)),
             auth=auth,
+            ledger=ledger,
         )
 
     def as_dict(self) -> dict[str, Any]:
